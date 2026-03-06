@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""
+WebRTC QoE Training Data Generator — CLI Entry Point
+
+Usage:
+    # Step 1: Generate the test input video
+    python run.py generate-video
+
+    # Step 2: Start Docker containers (do this separately)
+    docker compose up -d
+
+    # Step 3: Run experiments
+    python run.py run --loss 0 5 10 20 --delay 0 100 --jitter 0 --repeats 2
+
+    # Step 4: Assemble the training dataset
+    python run.py build-dataset
+
+    # Optional: show dataset summary
+    python run.py summary
+"""
+
+import argparse
+import logging
+import subprocess
+import sys
+from pathlib import Path
+
+# Ensure project root is on the module path
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import Config
+
+
+def setup_logging(verbose: bool = False) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)-5s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Suppress noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("selenium").setLevel(logging.WARNING)
+
+
+# ---- Commands ---------------------------------------------------------------
+
+
+def cmd_generate_video(args: argparse.Namespace) -> None:
+    """Generate the test input video (Y4M + WAV) for Chrome's fake capture."""
+    script = PROJECT_ROOT / "scripts" / "generate_input_video.sh"
+
+    if not script.exists():
+        print(f"ERROR: Script not found: {script}")
+        sys.exit(1)
+
+    cmd = [
+        "bash", str(script),
+        args.source_url,
+        str(args.width),
+        str(args.height),
+        str(args.fps),
+        str(args.duration),
+        str(args.padding),
+        "media",
+    ]
+    print(f"Generating test video ({args.width}x{args.height}@{args.fps}fps, "
+          f"{args.duration}s content + {args.padding}s padding per side)...")
+    subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    """Run the experiment pipeline."""
+    from pipeline.orchestrator import Orchestrator
+    from pipeline.vmaf import check_ffmpeg_vmaf
+
+    # Pre-flight checks
+    _check_docker_running()
+    if not check_ffmpeg_vmaf():
+        print("WARNING: FFmpeg does not have libvmaf support.")
+        print("VMAF computation will fail. Install ffmpeg with --enable-libvmaf.")
+        print("On Ubuntu/Debian: sudo apt install ffmpeg")
+        print("On macOS: brew install ffmpeg")
+        if not args.skip_vmaf:
+            sys.exit(1)
+
+    ref_video = PROJECT_ROOT / "media" / "reference.y4m"
+    if not ref_video.exists():
+        print("ERROR: Reference video not found. Run 'python run.py generate-video' first.")
+        sys.exit(1)
+
+    # Build config from CLI args
+    config = Config()
+    if args.loss is not None:
+        config.loss_values = args.loss
+    if args.delay is not None:
+        config.delay_values = args.delay
+    if args.jitter is not None:
+        config.jitter_values = args.jitter
+    if args.bandwidth is not None:
+        config.bandwidth_values = args.bandwidth
+    if args.repeats is not None:
+        config.repeats = args.repeats
+    if args.duration is not None:
+        config.test_duration_sec = args.duration
+
+    orchestrator = Orchestrator(config)
+
+    grid = orchestrator.generate_grid()
+    print(f"Experiment grid: {len(grid)} experiments")
+    print(f"  Loss:     {config.loss_values}")
+    print(f"  Delay:    {config.delay_values}")
+    print(f"  Jitter:   {config.jitter_values}")
+    print(f"  Repeats:  {config.repeats}")
+    print(f"  Duration: {config.test_duration_sec}s per experiment")
+    estimated_time = len(grid) * (config.test_duration_sec + 15)
+    print(f"  Estimated total time: ~{estimated_time // 60} minutes")
+    print()
+
+    results = orchestrator.run_all(resume=args.resume)
+    print(f"\nCompleted {len(results)} experiments.")
+
+    if results:
+        vmaf_scores = [r["mean_vmaf"] for r in results]
+        print(f"VMAF range: {min(vmaf_scores):.1f} - {max(vmaf_scores):.1f}")
+
+
+def cmd_build_dataset(args: argparse.Namespace) -> None:
+    """Assemble individual experiment results into a training dataset."""
+    from pipeline.dataset import build_dataset
+
+    config = Config()
+    csv_path = build_dataset(config.output_dir, config.dataset_dir)
+    print(f"Dataset written to: {csv_path}")
+
+
+def cmd_summary(args: argparse.Namespace) -> None:
+    """Show a summary of the current dataset."""
+    from pipeline.dataset import dataset_summary
+
+    config = Config()
+    csv_path = config.dataset_dir / "dataset.csv"
+
+    if not csv_path.exists():
+        print("No dataset found. Run 'python run.py build-dataset' first.")
+        sys.exit(1)
+
+    print(dataset_summary(csv_path))
+
+
+# ---- Utilities --------------------------------------------------------------
+
+
+def _check_docker_running() -> None:
+    """Verify Docker containers are up."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "ps", "--format", "json"],
+            capture_output=True, text=True, check=True,
+            cwd=str(PROJECT_ROOT),
+        )
+        if "webrtc-sender" not in result.stdout or "webrtc-receiver" not in result.stdout:
+            print("WARNING: Docker containers may not be running.")
+            print("Start them with: docker compose up -d")
+            print("(from the webrtc-qoe-data-generator directory)")
+            print()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("WARNING: Could not check Docker status.")
+        print("Make sure Docker is running and containers are up:")
+        print("  cd webrtc-qoe-data-generator && docker compose up -d")
+        print()
+
+
+# ---- Main -------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="WebRTC QoE Training Data Generator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run.py generate-video
+  docker compose up -d
+  python run.py run --loss 0 5 10 --delay 0 100 --jitter 0 --repeats 2 --duration 20
+  python run.py build-dataset
+  python run.py summary
+        """,
+    )
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable debug logging")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- generate-video ---
+    gen = subparsers.add_parser(
+        "generate-video",
+        help="Generate test input video (Y4M + WAV)",
+    )
+    gen.add_argument("--source-url", default=(
+        "https://archive.org/download/"
+        "e-dv548_lwe08_christa_casebeer_003.ogg/"
+        "e-dv548_lwe08_christa_casebeer_003.mp4"
+    ), help="URL of source video to download")
+    gen.add_argument("--width", type=int, default=640)
+    gen.add_argument("--height", type=int, default=480)
+    gen.add_argument("--fps", type=int, default=24)
+    gen.add_argument("--duration", type=int, default=30,
+                     help="Content video duration in seconds")
+    gen.add_argument("--padding", type=int, default=5,
+                     help="Padding duration in seconds (testsrc color bars on each side)")
+    gen.set_defaults(func=cmd_generate_video)
+
+    # --- run ---
+    run = subparsers.add_parser(
+        "run",
+        help="Run experiments across network conditions",
+    )
+    run.add_argument("--loss", nargs="*", type=float,
+                     help="Packet loss percentages (e.g., 0 5 10 20)")
+    run.add_argument("--delay", nargs="*", type=int,
+                     help="Delay values in ms (e.g., 0 50 100)")
+    run.add_argument("--jitter", nargs="*", type=int,
+                     help="Jitter values in ms (e.g., 0 25 50)")
+    run.add_argument("--bandwidth", nargs="*", type=int,
+                     help="Bandwidth limits in kbps (0 = unlimited)")
+    run.add_argument("--repeats", type=int,
+                     help="Number of repeats per condition (default: 3)")
+    run.add_argument("--duration", type=int,
+                     help="Test duration in seconds (default: 30)")
+    run.add_argument("--resume", action="store_true", default=True,
+                     help="Skip already-completed experiments (default)")
+    run.add_argument("--no-resume", dest="resume", action="store_false",
+                     help="Re-run all experiments even if results exist")
+    run.add_argument("--skip-vmaf", action="store_true",
+                     help="Continue even if FFmpeg lacks libvmaf")
+    run.set_defaults(func=cmd_run)
+
+    # --- build-dataset ---
+    ds = subparsers.add_parser(
+        "build-dataset",
+        help="Assemble training dataset from experiment results",
+    )
+    ds.set_defaults(func=cmd_build_dataset)
+
+    # --- summary ---
+    sm = subparsers.add_parser(
+        "summary",
+        help="Show dataset summary statistics",
+    )
+    sm.set_defaults(func=cmd_summary)
+
+    # Parse and dispatch
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

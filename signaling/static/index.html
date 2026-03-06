@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC QoE Test</title>
+    <style>
+        body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+        video { max-width: 640px; max-height: 480px; background: #000; display: block; margin: 10px 0; }
+        #status { font-size: 1.2em; padding: 8px; border-left: 4px solid #555; margin: 10px 0; }
+        #status.connected { border-color: #4c4; }
+        #status.error { border-color: #c44; }
+        #log { font-size: 0.8em; color: #999; max-height: 200px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h2 id="role-label">WebRTC QoE</h2>
+    <div id="status">Initializing...</div>
+    <video id="video" autoplay playsinline muted></video>
+    <div id="log"></div>
+
+    <script>
+    // =========================================================================
+    // WebRTC QoE Data Generator — Browser Client
+    //
+    // Single page that acts as either sender or receiver based on URL parameter.
+    // Sender:   captures media (from Chrome's fake device) and sends via WebRTC.
+    // Receiver: receives the WebRTC stream and exposes recording functions
+    //           that the Python orchestrator calls via Selenium.
+    // =========================================================================
+
+    const params = new URLSearchParams(window.location.search);
+    const ROLE = params.get('role') || 'sender';
+    const ROOM = params.get('room') || 'default';
+
+    const statusEl = document.getElementById('status');
+    const videoEl = document.getElementById('video');
+    const logEl = document.getElementById('log');
+    document.getElementById('role-label').textContent = `WebRTC QoE — ${ROLE}`;
+
+    // --- Globals exposed to Selenium ---
+    window.__connectionState = 'new';
+    window.__recording = false;
+    window.__recordingData = null;
+    window.__remoteStream = null;
+    window.__error = null;
+
+    let pc = null;
+    let ws = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+
+    function log(msg) {
+        const now = new Date().toISOString().split('T')[1].split('.')[0];
+        const entry = document.createElement('div');
+        entry.textContent = `[${now}] ${msg}`;
+        logEl.prepend(entry);
+        console.log(`[${ROLE}] ${msg}`);
+    }
+
+    function setStatus(text, state) {
+        statusEl.textContent = text;
+        statusEl.className = state || '';
+    }
+
+    // =========================================================================
+    // WebSocket Signaling
+    // =========================================================================
+
+    function connectSignaling() {
+        const wsUrl = `ws://${location.host}/ws?role=${ROLE}&room=${ROOM}`;
+        log(`Connecting to signaling: ${wsUrl}`);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            log('Signaling connected');
+            setStatus(`${ROLE}: waiting for peer...`);
+        };
+
+        ws.onmessage = async (event) => {
+            let data;
+            try {
+                data = JSON.parse(event.data);
+            } catch (e) {
+                log(`Invalid message: ${event.data}`);
+                return;
+            }
+
+            // Handle signaling messages
+            if (data.type === 'peer-joined') {
+                log(`Peer joined: ${data.role}`);
+                // If we're the sender and receiver just joined, start the call
+                if (ROLE === 'sender') {
+                    await startCall();
+                }
+            } else if (data.type === 'offer') {
+                log('Received offer');
+                await handleOffer(data);
+            } else if (data.type === 'answer') {
+                log('Received answer');
+                await pc.setRemoteDescription(new RTCSessionDescription(data));
+            } else if (data.candidate !== undefined) {
+                log('Received ICE candidate');
+                if (data.candidate) {
+                    await pc.addIceCandidate(new RTCIceCandidate(data));
+                }
+            }
+        };
+
+        ws.onerror = (err) => {
+            log(`Signaling error: ${err}`);
+            setStatus(`${ROLE}: signaling error`, 'error');
+        };
+
+        ws.onclose = () => {
+            log('Signaling disconnected');
+        };
+    }
+
+    // =========================================================================
+    // RTCPeerConnection Setup
+    // =========================================================================
+
+    function createPeerConnection() {
+        // No STUN/TURN needed — all containers are on the same Docker network,
+        // so host ICE candidates resolve directly.
+        pc = new RTCPeerConnection({ iceServers: [] });
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(event.candidate.toJSON()));
+            }
+        };
+
+        pc.onconnectionstatechange = () => {
+            const state = pc.connectionState;
+            window.__connectionState = state;
+            log(`Connection state: ${state}`);
+            if (state === 'connected') {
+                setStatus(`${ROLE}: connected`, 'connected');
+            } else if (state === 'failed' || state === 'disconnected') {
+                setStatus(`${ROLE}: ${state}`, 'error');
+            }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            log(`ICE state: ${pc.iceConnectionState}`);
+        };
+
+        // Receiver: handle incoming tracks
+        if (ROLE === 'receiver') {
+            pc.ontrack = (event) => {
+                log(`Received track: ${event.track.kind}`);
+                const stream = event.streams[0];
+                if (stream) {
+                    videoEl.srcObject = stream;
+                    window.__remoteStream = stream;
+                    log('Remote stream attached to video element');
+                }
+            };
+        }
+
+        window.__pc = pc;
+        log('PeerConnection created');
+    }
+
+    // =========================================================================
+    // Sender: Capture media and create offer
+    // =========================================================================
+
+    async function startCall() {
+        if (pc) {
+            log('Call already started, skipping');
+            return;
+        }
+
+        createPeerConnection();
+
+        try {
+            // getUserMedia — Chrome will use the fake device (Y4M file)
+            // when launched with --use-fake-device-for-media-stream and
+            // --use-file-for-fake-video-capture flags.
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    frameRate: { ideal: 24 }
+                },
+                audio: true
+            });
+
+            stream.getTracks().forEach(track => {
+                pc.addTrack(track, stream);
+                log(`Added track: ${track.kind}`);
+            });
+
+            videoEl.srcObject = stream;
+            log('Local media captured');
+
+            // Create and send offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify(pc.localDescription.toJSON()));
+            log('Sent offer');
+
+        } catch (err) {
+            log(`getUserMedia error: ${err.message}`);
+            window.__error = err.message;
+            setStatus(`${ROLE}: media error`, 'error');
+        }
+    }
+
+    // =========================================================================
+    // Receiver: Handle incoming offer
+    // =========================================================================
+
+    async function handleOffer(offer) {
+        if (!pc) {
+            createPeerConnection();
+        }
+
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify(pc.localDescription.toJSON()));
+        log('Sent answer');
+    }
+
+    // =========================================================================
+    // Recording API (receiver only)
+    //
+    // These global functions are called by the Python orchestrator via
+    // Selenium's execute_script / execute_async_script.
+    // This replaces the RecordRTC-based approach from the original project.
+    // =========================================================================
+
+    /**
+     * Start recording the received remote stream.
+     * Called by Selenium: driver.execute_script("return window.startRecording()")
+     */
+    window.startRecording = function() {
+        const stream = window.__remoteStream;
+        if (!stream) {
+            throw new Error('No remote stream available. Is the WebRTC connection established?');
+        }
+
+        recordedChunks = [];
+
+        // Determine best available codec
+        let mimeType = 'video/webm;codecs=vp8,opus';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = 'video/webm';
+            log(`VP8+opus not supported, falling back to: ${mimeType}`);
+        }
+
+        mediaRecorder = new MediaRecorder(stream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: 3000000  // 3 Mbps
+        });
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+                recordedChunks.push(event.data);
+            }
+        };
+
+        mediaRecorder.onerror = (event) => {
+            log(`MediaRecorder error: ${event.error}`);
+            window.__error = event.error.message;
+        };
+
+        mediaRecorder.start(1000);  // Collect data in 1-second chunks
+        window.__recording = true;
+        log('Recording started');
+        return true;
+    };
+
+    /**
+     * Stop recording. Returns a Promise that resolves when stopped.
+     * Called by Selenium: driver.execute_async_script("... stopRecording().then(cb) ...")
+     */
+    window.stopRecording = function() {
+        return new Promise((resolve, reject) => {
+            if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+                reject(new Error('No active recording'));
+                return;
+            }
+
+            mediaRecorder.onstop = () => {
+                window.__recording = false;
+                log(`Recording stopped. Chunks: ${recordedChunks.length}`);
+                resolve(true);
+            };
+
+            mediaRecorder.stop();
+        });
+    };
+
+    /**
+     * Get the recording as a base64 data URL.
+     * This mirrors the pattern from the original elastest-remote-control.js
+     * (recordingToData function), which used FileReader.readAsDataURL.
+     * Called by Selenium: driver.execute_async_script("... getRecordingBase64().then(cb) ...")
+     */
+    window.getRecordingBase64 = function() {
+        return new Promise((resolve, reject) => {
+            if (recordedChunks.length === 0) {
+                reject(new Error('No recording data available'));
+                return;
+            }
+
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            log(`Recording blob size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                window.__recordingData = reader.result;
+                resolve(reader.result);
+            };
+            reader.onerror = () => {
+                reject(new Error('Failed to read recording blob'));
+            };
+            reader.readAsDataURL(blob);
+        });
+    };
+
+    // =========================================================================
+    // Initialization
+    // =========================================================================
+
+    // Start signaling connection
+    connectSignaling();
+
+    // If we're a receiver, we wait for the sender's offer.
+    // If we're a sender, we wait for the receiver to join (peer-joined message),
+    // then start the call.
+    log(`Initialized as ${ROLE} in room "${ROOM}"`);
+    </script>
+</body>
+</html>

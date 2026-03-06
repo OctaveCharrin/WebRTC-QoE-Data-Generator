@@ -1,0 +1,55 @@
+services:
+  signaling:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.signaling
+    container_name: webrtc-signaling
+    ports:
+      - "8080:8080"
+    networks:
+      - webrtc-net
+
+  sender:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.browser
+    container_name: webrtc-sender
+    ports:
+      - "4444:4444"   # Selenium WebDriver
+      - "7900:7900"   # noVNC (open http://localhost:7900 to watch the browser)
+    volumes:
+      - ./media:/home/seluser/media:ro
+      - ./output/pcaps:/home/seluser/pcaps
+    networks:
+      - webrtc-net
+    cap_add:
+      - NET_ADMIN      # Required for tc/netem
+      - NET_RAW         # Required for tcpdump
+    shm_size: "2g"      # Chrome needs plenty of shared memory
+    environment:
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SESSION_TIMEOUT=600
+
+  receiver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.browser
+    container_name: webrtc-receiver
+    ports:
+      - "4445:4444"   # Selenium WebDriver (mapped to different host port)
+      - "7901:7900"   # noVNC
+    volumes:
+      - ./output/recordings:/home/seluser/recordings
+    networks:
+      - webrtc-net
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    shm_size: "2g"
+    environment:
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SESSION_TIMEOUT=600
+
+networks:
+  webrtc-net:
+    driver: bridge

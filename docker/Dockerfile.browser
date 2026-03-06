@@ -1,0 +1,18 @@
+FROM selenium/standalone-chrome:latest
+
+USER root
+
+# Install tc (iproute2) for netem network impairment and tcpdump for packet capture.
+# These are the two tools that the original project lacked on the traffic capture side.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        iproute2 \
+        tcpdump \
+        iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+# Allow non-root user to run tcpdump.
+# NET_ADMIN and NET_RAW capabilities are also granted via docker-compose.
+RUN setcap cap_net_raw+eip /usr/bin/tcpdump || true
+
+USER seluser

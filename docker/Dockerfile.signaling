@@ -5,16 +5,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Enable bytecode compilation
+# Enable bytecode compilation and copy mode (required in containers)
 ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 
-# Install dependencies first (for caching)
-COPY pyproject.toml uv.lock ./
+# Install dependencies first (for Docker layer caching)
+COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-install-project
 
-# Copy source and install project
-COPY . .
-RUN uv sync --frozen
+# Copy application code
+COPY signaling/server.py ./
+COPY signaling/static/ ./static/
 
-# Use 'uv run' to execute
-CMD ["uv", "run", "python", "run.py"]
+CMD ["uv", "run", "python", "server.py"]

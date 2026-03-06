@@ -4,19 +4,19 @@ WebRTC QoE Training Data Generator — CLI Entry Point
 
 Usage:
     # Step 1: Generate the test input video
-    python run.py generate-video
+    uv run python run.py generate-video
 
     # Step 2: Start Docker containers (do this separately)
     docker compose up -d
 
     # Step 3: Run experiments
-    python run.py run --loss 0 5 10 20 --delay 0 100 --jitter 0 --repeats 2
+    uv run python run.py run --loss 0 5 10 20 --delay 0 100 --jitter 0 --repeats 2
 
     # Step 4: Assemble the training dataset
-    python run.py build-dataset
+    uv run python run.py build-dataset
 
     # Optional: show dataset summary
-    python run.py summary
+    uv run python run.py summary
 """
 
 import argparse
@@ -181,11 +181,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run.py generate-video
+  uv run python run.py generate-video
   docker compose up -d
-  python run.py run --loss 0 5 10 --delay 0 100 --jitter 0 --repeats 2 --duration 20
-  python run.py build-dataset
-  python run.py summary
+  uv run python run.py run --loss 0 5 10 --delay 0 100 --jitter 0 --repeats 2 --duration 20
+  uv run python run.py build-dataset
+  uv run python run.py summary
         """,
     )
     parser.add_argument("-v", "--verbose", action="store_true",

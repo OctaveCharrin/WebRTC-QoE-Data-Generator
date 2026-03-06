@@ -30,7 +30,7 @@ Each experiment produces:
 | Tool | Install |
 |------|---------|
 | **Docker + Docker Compose** | [docker.com](https://docs.docker.com/get-docker/) |
-| **Python 3.10+** | [python.org](https://www.python.org/downloads/) |
+| **uv** (Python package manager) | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **FFmpeg with libvmaf** | `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Ubuntu 22+) |
 | **bash + wget/curl** | Pre-installed on macOS/Linux |
 
@@ -46,22 +46,22 @@ ffmpeg -filters 2>/dev/null | grep libvmaf
 cd webrtc-qoe-data-generator
 
 # 1. Install Python dependencies
-pip install -r requirements.txt
+uv sync
 
 # 2. Generate the test input video (640x480, 24fps, 30s content + 5s padding)
-python run.py generate-video
+uv run python run.py generate-video
 
 # 3. Build and start Docker containers
 docker compose up -d --build
 
 # 4. Run a small test (2 conditions x 1 repeat = 2 experiments)
-python run.py run --loss 0 10 --delay 0 --jitter 0 --repeats 1 --duration 15
+uv run python run.py run --loss 0 10 --delay 0 --jitter 0 --repeats 1 --duration 15
 
 # 5. Assemble the dataset
-python run.py build-dataset
+uv run python run.py build-dataset
 
 # 6. View results
-python run.py summary
+uv run python run.py summary
 ```
 
 ## Usage
@@ -69,7 +69,7 @@ python run.py summary
 ### Generate test video
 
 ```bash
-python run.py generate-video [--width 640] [--height 480] [--fps 24] [--duration 30] [--padding 5]
+uv run python run.py generate-video [--width 640] [--height 480] [--fps 24] [--duration 30] [--padding 5]
 ```
 
 Produces:
@@ -85,7 +85,7 @@ receiver. Frame numbers are overlaid on the content for future per-frame alignme
 ### Run experiments
 
 ```bash
-python run.py run \
+uv run python run.py run \
     --loss 0 5 10 15 20 25 30 40 50 \
     --delay 0 50 100 200 \
     --jitter 0 25 50 \
@@ -109,7 +109,7 @@ it will skip experiments that already have a `result.json`.
 ### Build dataset
 
 ```bash
-python run.py build-dataset
+uv run python run.py build-dataset
 ```
 
 Produces `output/dataset/dataset.csv` with one row per experiment.
@@ -117,7 +117,7 @@ Produces `output/dataset/dataset.csv` with one row per experiment.
 ### View summary
 
 ```bash
-python run.py summary
+uv run python run.py summary
 ```
 
 ## Output Structure
@@ -200,14 +200,14 @@ for _, row in df.iterrows():
 webrtc-qoe-data-generator/
   run.py                     # CLI entry point
   config.py                  # Central configuration
-  requirements.txt           # Python dependencies
+  pyproject.toml             # Python dependencies (uv)
+  uv.lock                    # Locked dependency versions
   docker-compose.yml         # Container orchestration
   docker/
     Dockerfile.browser       # Chrome + tc + tcpdump
     Dockerfile.signaling     # Python signaling server
   signaling/
     server.py                # WebSocket relay + static server
-    requirements.txt
     static/
       index.html             # WebRTC sender/receiver page
   scripts/

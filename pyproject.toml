@@ -1,0 +1,12 @@
+[project]
+name = "webrtc-qoe-data-generator"
+version = "0.1.0"
+description = "Generates labeled training data for deep learning models that predict video QoE (VMAF) from WebRTC network traffic features"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "selenium>=4.15.0",
+    "scapy>=2.5.0",
+    "numpy>=1.24.0",
+    "pandas>=1.5.0",
+]

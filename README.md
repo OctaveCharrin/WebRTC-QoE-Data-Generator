@@ -101,6 +101,7 @@ Options:
 - `--repeats`: Number of repeats per condition
 - `--duration`: Recording duration in seconds
 - `--resume / --no-resume`: Skip already-completed experiments (default: resume)
+- `--debug-frames`: Generate side-by-side frame comparison PNGs for alignment verification
 - `-v`: Verbose debug logging
 
 The pipeline is **resumable** — if interrupted, re-run the same command and
@@ -118,6 +119,29 @@ Produces `output/dataset/dataset.csv` with one row per experiment.
 
 ```bash
 uv run python run.py summary
+```
+
+### Debug frame alignment
+
+After running experiments, verify that the pipeline correctly aligns sender and
+receiver frames before VMAF scoring:
+
+```bash
+# Post-hoc: generate comparison PNGs for a specific experiment
+uv run python run.py debug-alignment L0.0_D0_J0_BW0_R0
+
+# Extract every 5th frame instead of every 10th
+uv run python run.py debug-alignment L0.0_D0_J0_BW0_R0 --step 5
+```
+
+This produces side-by-side PNGs in `output/<experiment_id>/debug_frames/` showing
+the reference (sender) frame on the left and the received frame on the right,
+annotated with frame number and VMAF score (if available).
+
+You can also generate these during a run with `--debug-frames`:
+
+```bash
+uv run python run.py run --loss 0 10 --delay 0 --jitter 0 --repeats 1 --debug-frames
 ```
 
 ## Output Structure
@@ -141,6 +165,10 @@ output/
     ..._packet_timestamps.npy   # numpy array: seconds from first packet
     ..._per_frame_vmaf.npy      # numpy array: VMAF per content frame
     ..._frame_times.npy         # numpy array: seconds from content start
+    debug_frames/           # (optional) side-by-side alignment PNGs
+      frame_0000.png
+      frame_0010.png
+      ...
   dataset/
     dataset.csv             # Consolidated training dataset
 ```

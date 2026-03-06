@@ -129,17 +129,15 @@ def detect_padding_boundaries(
     The video has the structure:
       [testsrc padding] [content with frame numbers] [testsrc padding]
 
-    We scan forward from the start to find where padding ends (content starts),
-    and backward from the end to find where content ends (padding starts).
-
-    Instead of checking every frame (slow), we use the known padding duration
-    as a hint and do a binary-search-like scan around the expected boundaries.
+    We scan forward from frame 0 to find where padding ends (content starts),
+    and backward from the last frame to find where content ends (padding
+    starts again).
 
     Args:
         video_path: Path to the normalized Y4M video.
         width, height: Video dimensions.
         fps: Frame rate.
-        padding_duration_sec: Expected padding duration (used as hint).
+        padding_duration_sec: Expected padding duration (used for logging).
         threshold: RGB matching threshold per channel.
 
     Returns:
@@ -153,57 +151,49 @@ def detect_padding_boundaries(
         f"(expected ~{expected_padding_frames} padding frames per side)..."
     )
 
-    # --- Find start of content (scan forward from expected boundary) ---
-    # Start searching around where we expect the transition
-    search_start = max(0, expected_padding_frames - fps)  # 1 second before expected
-    search_end = min(total_frames, expected_padding_frames + fps)  # 1 second after
-
+    # --- Find start of content (scan forward from frame 0) ---
+    # Check whether the first frame is padding at all.
     first_content = 0
-    for i in range(search_start, search_end):
-        frame = _extract_frame_rgb(video_path, i, width, height)
-        if frame is None:
-            continue
-        if not _is_padding_frame(frame, width, height, threshold):
-            first_content = i
-            logger.info(f"  Content starts at frame {i} (expected ~{expected_padding_frames})")
-            break
-    else:
-        # Fallback: scan from beginning
-        logger.warning("  Could not find content start near expected position, scanning from 0...")
-        for i in range(0, min(total_frames, expected_padding_frames * 3)):
+    first_frame = _extract_frame_rgb(video_path, 0, width, height)
+    if first_frame is not None and _is_padding_frame(first_frame, width, height, threshold):
+        # There IS padding at the start — find where it ends.
+        # Scan forward until we hit a non-padding frame.
+        max_scan = min(total_frames, expected_padding_frames * 3)
+        for i in range(1, max_scan):
             frame = _extract_frame_rgb(video_path, i, width, height)
             if frame is None:
                 continue
             if not _is_padding_frame(frame, width, height, threshold):
                 first_content = i
-                logger.info(f"  Content starts at frame {i}")
                 break
-
-    # --- Find end of content (scan backward from expected boundary) ---
-    end_padding_start = total_frames - expected_padding_frames
-    search_start_rev = min(total_frames - 1, end_padding_start + fps)
-    search_end_rev = max(0, end_padding_start - fps)
-
-    last_content = total_frames - 1
-    for i in range(search_start_rev, search_end_rev, -1):
-        frame = _extract_frame_rgb(video_path, i, width, height)
-        if frame is None:
-            continue
-        if not _is_padding_frame(frame, width, height, threshold):
-            last_content = i
-            logger.info(f"  Content ends at frame {i} (expected ~{end_padding_start})")
-            break
+        logger.info(
+            f"  Content starts at frame {first_content} "
+            f"(expected ~{expected_padding_frames})"
+        )
     else:
-        # Fallback: scan from end
-        logger.warning("  Could not find content end near expected position, scanning from end...")
-        for i in range(total_frames - 1, max(0, total_frames - expected_padding_frames * 3), -1):
+        logger.info("  No padding detected at start, content starts at frame 0")
+
+    # --- Find end of content (scan backward from end) ---
+    last_content = total_frames - 1
+    last_frame = _extract_frame_rgb(video_path, last_content, width, height)
+    if last_frame is not None and _is_padding_frame(last_frame, width, height, threshold):
+        # There IS padding at the end — find where it starts.
+        min_scan = max(0, total_frames - expected_padding_frames * 3)
+        for i in range(total_frames - 2, min_scan, -1):
             frame = _extract_frame_rgb(video_path, i, width, height)
             if frame is None:
                 continue
             if not _is_padding_frame(frame, width, height, threshold):
                 last_content = i
-                logger.info(f"  Content ends at frame {i}")
                 break
+        logger.info(
+            f"  Content ends at frame {last_content} "
+            f"(expected ~{total_frames - expected_padding_frames})"
+        )
+    else:
+        logger.info(
+            f"  No padding detected at end, content ends at frame {last_content}"
+        )
 
     content_frames = last_content - first_content + 1
     logger.info(

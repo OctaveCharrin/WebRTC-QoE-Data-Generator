@@ -148,31 +148,49 @@ class Orchestrator:
             # Small settle time for media flow to stabilize
             time.sleep(2)
 
-            # --- Step 4: Start tcpdump ---
+            # --- Step 4: Reset sender's video to frame 0 ---
+            # Chrome's fake video capture has been playing since getUserMedia()
+            # was called during startCall(). By now, several seconds have
+            # elapsed and the video is past the initial padding and into the
+            # content. Resetting restarts the video from frame 0 so the
+            # receiver records the full [padding][content][padding] structure.
+            self.sender.reset_media_tracks()
+            time.sleep(1)  # Let new track propagate to receiver
+
+            # --- Step 5: Start tcpdump ---
             self.network.start_tcpdump(pcap_container_path)
 
-            # --- Step 5: Start MediaRecorder on receiver ---
+            # --- Step 6: Start MediaRecorder on receiver ---
             self.receiver.start_recording()
 
-            # --- Step 6: Apply network impairment ---
+            # --- Step 7: Brief delay for padding capture ---
+            # After replaceTrack, the receiver captures ~0.5s of testsrc
+            # padding before the content begins. A short sleep lets these
+            # padding frames arrive cleanly before applying impairment.
+            time.sleep(2)
+
+            # --- Step 8: Apply network impairment ---
             self.network.apply_netem(condition)
 
-            # --- Step 7: Wait for test duration ---
+            # --- Step 9: Wait for test duration ---
             logger.info(
                 f"Recording for {self.config.test_duration_sec}s "
                 f"under {condition}..."
             )
             time.sleep(self.config.test_duration_sec)
 
-            # --- Step 8: Reset network ---
+            # --- Step 10: Reset network ---
             self.network.reset_netem()
 
-            # --- Step 9: Stop recording and retrieve WebM ---
+            # --- Step 11: Brief grace period then stop recording ---
+            time.sleep(2)
+
+            # --- Step 12: Stop recording and retrieve WebM ---
             self.receiver.stop_recording()
             time.sleep(1)  # Let recording finalize
             self.receiver.save_recording(recording_path)
 
-            # --- Step 10: Stop tcpdump and copy pcap ---
+            # --- Step 13: Stop tcpdump and copy pcap ---
             self.network.stop_tcpdump()
             time.sleep(0.5)
             self.network.copy_pcap(pcap_container_path, pcap_local)

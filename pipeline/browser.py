@@ -154,6 +154,27 @@ class BrowserController:
         except Exception:
             pass  # Some Selenium versions don't support get_log
 
+    # ---- Media track reset (sender only) -----------------------------------
+
+    def reset_media_tracks(self) -> None:
+        """
+        Reset media tracks on sender to restart fake video from frame 0.
+
+        Calls getUserMedia() again (Chrome restarts fake video capture from
+        the beginning of the Y4M file) and uses RTCRtpSender.replaceTrack()
+        to swap the tracks without renegotiation. The receiver's stream
+        continues seamlessly.
+        """
+        result = self.driver.execute_async_script("""
+            var callback = arguments[arguments.length - 1];
+            window.resetMediaTracks()
+                .then(function(r) { callback(r); })
+                .catch(function(e) { callback('ERROR: ' + e.message); });
+        """)
+        if isinstance(result, str) and result.startswith("ERROR:"):
+            raise RuntimeError(f"resetMediaTracks failed: {result}")
+        logger.info(f"[{self.role}] Media tracks reset (video restarted from frame 0)")
+
     # ---- Recording (receiver only) -----------------------------------------
 
     def start_recording(self) -> None:

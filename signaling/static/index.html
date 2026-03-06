@@ -240,6 +240,49 @@
     }
 
     // =========================================================================
+    // Track Reset API (sender only)
+    //
+    // Restarts Chrome's fake video capture from frame 0 by calling
+    // getUserMedia() again and using replaceTrack() on the existing
+    // RTCRtpSenders. This avoids renegotiation — the receiver's stream
+    // continues seamlessly with the new track content.
+    // =========================================================================
+
+    /**
+     * Reset media tracks on sender so the fake video restarts from frame 0.
+     * Called by Selenium before starting the receiver's MediaRecorder.
+     */
+    window.resetMediaTracks = async function() {
+        if (ROLE !== 'sender' || !pc) {
+            log('resetMediaTracks: not applicable (role=' + ROLE + ', pc=' + !!pc + ')');
+            return false;
+        }
+
+        const newStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                frameRate: { ideal: 24 }
+            },
+            audio: true
+        });
+
+        const senders = pc.getSenders();
+        for (const sender of senders) {
+            const newTrack = newStream.getTracks().find(t => t.kind === sender.track.kind);
+            if (newTrack) {
+                await sender.replaceTrack(newTrack);
+                log('Replaced ' + sender.track.kind + ' track');
+            }
+        }
+
+        // Update the local video preview
+        videoEl.srcObject = newStream;
+        log('Media tracks reset (video restarted from frame 0)');
+        return true;
+    };
+
+    // =========================================================================
     // Recording API (receiver only)
     //
     // These global functions are called by the Python orchestrator via

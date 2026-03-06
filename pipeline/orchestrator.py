@@ -186,6 +186,7 @@ class Orchestrator:
 
             # 12a: Compute VMAF
             reference_video = self.config.media_dir / "reference.y4m"
+            debug_dir = exp_dir / "debug_frames" if self.config.debug_frames else None
             vmaf_result = compute_vmaf(
                 received_video=recording_path,
                 reference_video=reference_video,
@@ -195,6 +196,8 @@ class Orchestrator:
                 fps=self.config.video_fps,
                 padding_duration_sec=self.config.padding_duration_sec,
                 padding_threshold=self.config.padding_color_threshold,
+                debug_dir=debug_dir,
+                debug_frame_step=self.config.debug_frame_step,
             )
 
             # 12b: Parse pcap and extract traffic features

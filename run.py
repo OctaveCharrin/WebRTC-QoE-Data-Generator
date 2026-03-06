@@ -104,6 +104,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         config.repeats = args.repeats
     if args.duration is not None:
         config.test_duration_sec = args.duration
+    if args.debug_frames:
+        config.debug_frames = True
 
     orchestrator = Orchestrator(config)
 
@@ -147,6 +149,100 @@ def cmd_summary(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(dataset_summary(csv_path))
+
+
+def cmd_debug_alignment(args: argparse.Namespace) -> None:
+    """Generate side-by-side frame comparison PNGs for an existing experiment."""
+    from pipeline.vmaf import compute_vmaf, generate_frame_comparison
+    from pipeline.vmaf import detect_padding_boundaries, _get_frame_count
+
+    config = Config()
+    experiment_id = args.experiment_id
+
+    # Find the recording
+    recording_path = config.recordings_dir / f"{experiment_id}.webm"
+    if not recording_path.exists():
+        print(f"ERROR: Recording not found: {recording_path}")
+        print(f"Available recordings:")
+        for f in sorted(config.recordings_dir.glob("*.webm")):
+            print(f"  {f.stem}")
+        sys.exit(1)
+
+    reference_video = config.media_dir / "reference.y4m"
+    if not reference_video.exists():
+        print("ERROR: Reference video not found. Run 'python run.py generate-video' first.")
+        sys.exit(1)
+
+    output_dir = config.output_dir / experiment_id / "debug_frames"
+    vmaf_json = config.vmaf_dir / f"{experiment_id}_vmaf.json"
+
+    # Load per-frame VMAF scores if available
+    per_frame_vmaf = None
+    mean_vmaf = None
+    if vmaf_json.exists():
+        import json
+        with open(vmaf_json) as f:
+            vmaf_data = json.load(f)
+        per_frame_vmaf = [frame["metrics"]["vmaf"] for frame in vmaf_data["frames"]]
+        mean_vmaf = vmaf_data["pooled_metrics"]["vmaf"]["mean"]
+
+    # Re-run normalization and trimming (intermediates were deleted)
+    print(f"Processing {experiment_id}...")
+    width, height, fps = config.video_width, config.video_height, config.video_fps
+
+    # Convert WebM to Y4M
+    received_y4m = output_dir / f"{experiment_id}.received.y4m"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    convert_cmd = [
+        "ffmpeg", "-loglevel", "error", "-y",
+        "-i", str(recording_path),
+        "-vf", f"scale={width}:{height},fps={fps}",
+        "-pix_fmt", "yuv420p",
+        str(received_y4m),
+    ]
+    subprocess.run(convert_cmd, check=True)
+
+    # Detect padding
+    first_content, last_content = detect_padding_boundaries(
+        received_y4m, width, height, fps,
+        padding_duration_sec=config.padding_duration_sec,
+        threshold=config.padding_color_threshold,
+    )
+
+    # Trim to content
+    trimmed_y4m = output_dir / f"{experiment_id}.trimmed.y4m"
+    start_time = first_content / fps
+    content_duration = (last_content - first_content + 1) / fps
+    trim_cmd = [
+        "ffmpeg", "-loglevel", "error", "-y",
+        "-i", str(received_y4m),
+        "-ss", f"{start_time:.4f}",
+        "-t", f"{content_duration:.4f}",
+        "-pix_fmt", "yuv420p",
+        str(trimmed_y4m),
+    ]
+    subprocess.run(trim_cmd, check=True)
+
+    # Generate comparison frames
+    generate_frame_comparison(
+        trimmed_video=trimmed_y4m,
+        reference_video=reference_video,
+        output_dir=output_dir,
+        width=width,
+        height=height,
+        per_frame_vmaf=per_frame_vmaf,
+        mean_vmaf=mean_vmaf,
+        step=args.step,
+    )
+
+    # Clean up intermediates
+    received_y4m.unlink(missing_ok=True)
+    trimmed_y4m.unlink(missing_ok=True)
+
+    png_count = len(list(output_dir.glob("*.png")))
+    print(f"\nGenerated {png_count} comparison frames in:")
+    print(f"  {output_dir}")
+    print(f"\nOpen them to verify frame alignment between sender and receiver.")
 
 
 # ---- Utilities --------------------------------------------------------------
@@ -235,6 +331,8 @@ Examples:
                      help="Re-run all experiments even if results exist")
     run.add_argument("--skip-vmaf", action="store_true",
                      help="Continue even if FFmpeg lacks libvmaf")
+    run.add_argument("--debug-frames", action="store_true",
+                     help="Generate side-by-side frame comparison PNGs for alignment verification")
     run.set_defaults(func=cmd_run)
 
     # --- build-dataset ---
@@ -250,6 +348,17 @@ Examples:
         help="Show dataset summary statistics",
     )
     sm.set_defaults(func=cmd_summary)
+
+    # --- debug-alignment ---
+    da = subparsers.add_parser(
+        "debug-alignment",
+        help="Generate side-by-side frame comparison PNGs for an experiment",
+    )
+    da.add_argument("experiment_id",
+                    help="Experiment ID (e.g., L0.0_D0_J0_BW0_R0)")
+    da.add_argument("--step", type=int, default=10,
+                    help="Extract every Nth frame (default: 10)")
+    da.set_defaults(func=cmd_debug_alignment)
 
     # Parse and dispatch
     args = parser.parse_args()

@@ -348,6 +348,8 @@ def compute_vmaf(
     fps: int = 24,
     padding_duration_sec: int = 5,
     padding_threshold: int = 50,
+    debug_dir: Path | None = None,
+    debug_frame_step: int = 10,
 ) -> dict:
     """
     Compute VMAF score with automatic padding removal and alignment.
@@ -368,6 +370,8 @@ def compute_vmaf(
         fps: Target frame rate for comparison.
         padding_duration_sec: Expected padding duration per side (hint for detection).
         padding_threshold: RGB threshold for padding color matching.
+        debug_dir: If set, generate side-by-side frame comparison PNGs here.
+        debug_frame_step: Extract every Nth frame for debug comparison.
 
     Returns:
         Dictionary with:
@@ -451,6 +455,20 @@ def compute_vmaf(
     per_frame = [frame["metrics"]["vmaf"] for frame in vmaf_data["frames"]]
     mean_vmaf = vmaf_data["pooled_metrics"]["vmaf"]["mean"]
     frame_times = [i / fps for i in range(len(per_frame))]
+
+    # --- Optional: generate debug frame comparison ---
+    if debug_dir is not None:
+        logger.info("Generating debug frame comparisons...")
+        generate_frame_comparison(
+            trimmed_video=trimmed_y4m,
+            reference_video=reference_video,
+            output_dir=debug_dir,
+            width=width,
+            height=height,
+            per_frame_vmaf=per_frame,
+            mean_vmaf=mean_vmaf,
+            step=debug_frame_step,
+        )
 
     # Clean up intermediate files
     received_y4m.unlink(missing_ok=True)

@@ -50,6 +50,10 @@ class Config:
     # to video width. Threshold of 50 per channel for matching.
     padding_color_threshold: int = 50
 
+    # --- Debug / visualization ---
+    debug_frames: bool = False
+    debug_frame_step: int = 10
+
     # --- Docker container names (must match docker-compose.yml) ---
     sender_container: str = "webrtc-sender"
     receiver_container: str = "webrtc-receiver"

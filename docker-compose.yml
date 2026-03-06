@@ -13,6 +13,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.browser
+    platform: linux/amd64
     container_name: webrtc-sender
     ports:
       - "4444:4444"   # Selenium WebDriver
@@ -34,6 +35,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.browser
+    platform: linux/amd64
     container_name: webrtc-receiver
     ports:
       - "4445:4444"   # Selenium WebDriver (mapped to different host port)

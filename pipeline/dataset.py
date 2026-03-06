@@ -37,7 +37,8 @@ def build_dataset(output_dir: Path, dataset_dir: Path) -> Path:
         dataset_dir/dataset.csv with columns:
           experiment_id, loss_percent, delay_ms, jitter_ms, bandwidth_kbps,
           repeat, mean_vmaf, frame_count, packet_count, traffic_duration_sec,
-          packet_sizes_file, inter_packet_times_file, recording_file, pcap_file
+          packet_sizes_file, inter_packet_times_file, packet_timestamps_file,
+          per_frame_vmaf_file, frame_times_file, recording_file, pcap_file
 
     Returns:
         Path to the generated CSV file.
@@ -95,6 +96,9 @@ def load_experiment(dataset_csv: Path, experiment_id: str) -> dict:
         Dictionary with:
           - packet_sizes: np.ndarray (N,)
           - inter_packet_times: np.ndarray (N,)
+          - packet_timestamps: np.ndarray (N,) — seconds from first packet
+          - per_frame_vmaf: np.ndarray (F,) — VMAF per content frame
+          - frame_times: np.ndarray (F,) — seconds from content start (i / fps)
           - mean_vmaf: float
           - metadata: dict (all CSV columns)
     """
@@ -104,12 +108,23 @@ def load_experiment(dataset_csv: Path, experiment_id: str) -> dict:
         raise ValueError(f"Experiment not found: {experiment_id}")
 
     row = row.iloc[0]
-    return {
+    result = {
         "packet_sizes": np.load(row["packet_sizes_file"]),
         "inter_packet_times": np.load(row["inter_packet_times_file"]),
         "mean_vmaf": float(row["mean_vmaf"]),
         "metadata": row.to_dict(),
     }
+
+    # Load temporal arrays (available for experiments run after this feature)
+    for key, col in [
+        ("packet_timestamps", "packet_timestamps_file"),
+        ("per_frame_vmaf", "per_frame_vmaf_file"),
+        ("frame_times", "frame_times_file"),
+    ]:
+        if col in row and pd.notna(row[col]):
+            result[key] = np.load(row[col])
+
+    return result
 
 
 def dataset_summary(dataset_csv: Path) -> str:

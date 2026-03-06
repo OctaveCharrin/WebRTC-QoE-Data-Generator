@@ -11,6 +11,8 @@ import json
 import logging
 from aiohttp import web, WSMsgType
 
+from pathlib import Path
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -19,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 # Room state: room_id -> {"sender": ws, "receiver": ws}
 rooms: dict[str, dict[str, web.WebSocketResponse]] = {}
+
+
+STATIC_DIR = Path(__file__).parent / "static" if (Path(__file__).parent / "static").exists() else Path("static")
+
+
+async def index_handler(request: web.Request) -> web.FileResponse:
+    """Serve index.html for the root path (with any query parameters)."""
+    return web.FileResponse(STATIC_DIR / "index.html")
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -73,10 +83,11 @@ async def health_handler(request: web.Request) -> web.Response:
 
 def create_app() -> web.Application:
     app = web.Application()
+    app.router.add_get("/", index_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/health", health_handler)
-    # Serve static files (index.html) from the 'static' directory
-    app.router.add_static("/", "static", show_index=True)
+    # Serve other static assets (CSS, JS, etc.) if any are added later
+    app.router.add_static("/static", str(STATIC_DIR))
     return app
 
 

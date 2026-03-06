@@ -102,11 +102,10 @@ def save_traffic_features(
     """
     Save traffic features as numpy .npy files for model training.
 
-    The two key arrays saved are:
+    Arrays saved:
       - packet_sizes:       shape (N,) int32
       - inter_packet_times: shape (N,) float64
-
-    These are the features the DL model uses as input.
+      - packet_timestamps:  shape (N,) float64 — seconds relative to first packet
 
     Returns:
         Dictionary mapping feature name to the saved file path.
@@ -118,6 +117,13 @@ def save_traffic_features(
         path = output_dir / f"{experiment_id}_{key}.npy"
         np.save(path, traffic_data[key])
         paths[key] = path
+
+    # Save timestamps relative to the first packet (t=0 at capture start)
+    ts = traffic_data["timestamps"]
+    relative_ts = ts - ts[0] if len(ts) > 0 else ts
+    path = output_dir / f"{experiment_id}_packet_timestamps.npy"
+    np.save(path, relative_ts)
+    paths["packet_timestamps"] = path
 
     logger.info(
         f"Saved traffic features for {experiment_id}: "

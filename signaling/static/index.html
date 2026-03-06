@@ -40,10 +40,12 @@
 
     // --- Globals exposed to Selenium ---
     window.__connectionState = 'new';
+    window.__wsState = 'new';       // WebSocket state for diagnostics
     window.__recording = false;
     window.__recordingData = null;
     window.__remoteStream = null;
     window.__error = null;
+    window.__signalingLog = [];     // Recent signaling events for diagnostics
 
     let pc = null;
     let ws = null;
@@ -56,6 +58,9 @@
         entry.textContent = `[${now}] ${msg}`;
         logEl.prepend(entry);
         console.log(`[${ROLE}] ${msg}`);
+        // Keep last 50 entries for Selenium diagnostics
+        window.__signalingLog.push(`[${now}] ${msg}`);
+        if (window.__signalingLog.length > 50) window.__signalingLog.shift();
     }
 
     function setStatus(text, state) {
@@ -73,6 +78,7 @@
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
+            window.__wsState = 'open';
             log('Signaling connected');
             setStatus(`${ROLE}: waiting for peer...`);
         };
@@ -108,12 +114,15 @@
         };
 
         ws.onerror = (err) => {
+            window.__wsState = 'error';
             log(`Signaling error: ${err}`);
+            window.__error = `WebSocket error: ${err}`;
             setStatus(`${ROLE}: signaling error`, 'error');
         };
 
-        ws.onclose = () => {
-            log('Signaling disconnected');
+        ws.onclose = (event) => {
+            window.__wsState = 'closed';
+            log(`Signaling disconnected (code=${event.code}, reason=${event.reason || 'none'})`);
         };
     }
 
@@ -122,9 +131,13 @@
     // =========================================================================
 
     function createPeerConnection() {
-        // No STUN/TURN needed — all containers are on the same Docker network,
-        // so host ICE candidates resolve directly.
-        pc = new RTCPeerConnection({ iceServers: [] });
+        // Include a public STUN server to ensure ICE candidate gathering works
+        // correctly across Docker containers and under QEMU emulation.
+        // Host candidates (container IPs on the Docker bridge) are the ones
+        // actually used; STUN just kick-starts the gathering process.
+        pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
 
         pc.onicecandidate = (event) => {
             if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {

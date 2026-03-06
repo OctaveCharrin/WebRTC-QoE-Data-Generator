@@ -138,6 +138,9 @@ output/
     result.json             # Metadata + scores
     ..._packet_sizes.npy    # numpy array: packet sizes
     ..._inter_packet_times.npy  # numpy array: inter-packet gaps
+    ..._packet_timestamps.npy   # numpy array: seconds from first packet
+    ..._per_frame_vmaf.npy      # numpy array: VMAF per content frame
+    ..._frame_times.npy         # numpy array: seconds from content start
   dataset/
     dataset.csv             # Consolidated training dataset
 ```
@@ -158,6 +161,9 @@ output/
 | `traffic_duration_sec` | Duration of the traffic capture |
 | `packet_sizes_file` | Path to .npy with packet sizes array |
 | `inter_packet_times_file` | Path to .npy with inter-packet times array |
+| `packet_timestamps_file` | Path to .npy with packet times (seconds from first packet) |
+| `per_frame_vmaf_file` | Path to .npy with per-frame VMAF scores |
+| `frame_times_file` | Path to .npy with frame times (seconds from content start) |
 
 ### Loading data for model training
 
@@ -172,6 +178,34 @@ for _, row in df.iterrows():
     timings = np.load(row["inter_packet_times_file"])    # shape: (N,)
     vmaf = row["mean_vmaf"]                              # float, 0-100
     # Feed into your model...
+```
+
+### Loading temporal data for real-time VMAF inference
+
+Each experiment also saves time-aligned arrays for training models that predict
+VMAF in real time (e.g., a transformer over sliding windows of packets):
+
+```python
+import numpy as np
+import pandas as pd
+
+df = pd.read_csv("output/dataset/dataset.csv")
+row = df.iloc[0]
+
+# Packet-level features with timestamps (t=0 at capture start)
+packet_sizes = np.load(row["packet_sizes_file"])          # (N,) int32
+packet_times = np.load(row["packet_timestamps_file"])     # (N,) float64, seconds
+
+# Per-frame VMAF with timestamps (t=0 at content start)
+frame_vmaf = np.load(row["per_frame_vmaf_file"])          # (F,) float64, 0-100
+frame_times = np.load(row["frame_times_file"])            # (F,) float64, seconds
+
+# Example: for each frame, gather all packets up to that frame's time
+for i, t in enumerate(frame_times):
+    mask = packet_times <= t
+    window_sizes = packet_sizes[mask]
+    target_vmaf = frame_vmaf[i]
+    # Feed window_sizes -> target_vmaf into your model...
 ```
 
 ## Debugging

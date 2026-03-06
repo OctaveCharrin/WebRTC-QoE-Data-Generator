@@ -39,24 +39,50 @@ class BrowserController:
         self.role = role
         self.driver: Optional[webdriver.Remote] = None
 
-    def connect(self, chrome_flags: Optional[list[str]] = None) -> None:
+    def connect(
+        self,
+        chrome_flags: Optional[list[str]] = None,
+        max_retries: int = 10,
+        retry_delay: float = 3,
+    ) -> None:
         """
         Connect to the remote Chrome via Selenium WebDriver.
+
+        Retries if the Selenium container isn't ready yet (common when
+        containers were just started).
 
         Args:
             chrome_flags: Chrome command-line flags to pass. For the sender,
                           this includes the fake media device flags.
+            max_retries: Number of connection attempts before giving up.
+            retry_delay: Seconds between retries.
         """
         options = Options()
+        options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
         if chrome_flags:
             for flag in chrome_flags:
                 options.add_argument(flag)
 
         logger.info(f"[{self.role}] Connecting to {self.selenium_url}...")
-        self.driver = webdriver.Remote(
-            command_executor=self.selenium_url,
-            options=options,
-        )
+        for attempt in range(1, max_retries + 1):
+            try:
+                self.driver = webdriver.Remote(
+                    command_executor=self.selenium_url,
+                    options=options,
+                )
+                break
+            except Exception as e:
+                if attempt == max_retries:
+                    logger.error(
+                        f"[{self.role}] Failed to connect after {max_retries} attempts"
+                    )
+                    raise
+                logger.info(
+                    f"[{self.role}] Selenium not ready (attempt {attempt}/{max_retries}), "
+                    f"retrying in {retry_delay}s..."
+                )
+                time.sleep(retry_delay)
+
         self.driver.set_page_load_timeout(60)
         self.driver.set_script_timeout(60)
         logger.info(f"[{self.role}] Connected (session: {self.driver.session_id})")
@@ -86,11 +112,47 @@ class BrowserController:
                 return True
             if state == "failed":
                 logger.error(f"[{self.role}] WebRTC connection failed")
+                self._log_diagnostics()
                 return False
             time.sleep(0.5)
 
         logger.error(f"[{self.role}] WebRTC connection timeout ({timeout_sec}s)")
+        self._log_diagnostics()
         return False
+
+    def _log_diagnostics(self) -> None:
+        """Capture browser-side diagnostics to help debug connection issues."""
+        try:
+            diag = self.execute_script("""
+                return {
+                    wsState: window.__wsState,
+                    connectionState: window.__connectionState,
+                    error: window.__error,
+                    log: (window.__signalingLog || []).slice(-20),
+                    url: window.location.href,
+                    title: document.title
+                };
+            """)
+            if diag:
+                logger.error(f"[{self.role}] Diagnostics:")
+                logger.error(f"  URL: {diag.get('url')}")
+                logger.error(f"  WS state: {diag.get('wsState')}")
+                logger.error(f"  Connection state: {diag.get('connectionState')}")
+                logger.error(f"  Error: {diag.get('error')}")
+                for entry in (diag.get("log") or []):
+                    logger.error(f"  JS: {entry}")
+        except Exception as e:
+            logger.error(f"[{self.role}] Could not retrieve diagnostics: {e}")
+
+        # Also try to get browser console logs
+        try:
+            browser_logs = self.driver.get_log("browser")
+            if browser_logs:
+                logger.error(f"[{self.role}] Browser console logs:")
+                for entry in browser_logs[-20:]:
+                    logger.error(f"  [{entry.get('level')}] {entry.get('message')}")
+        except Exception:
+            pass  # Some Selenium versions don't support get_log
 
     # ---- Recording (receiver only) -----------------------------------------
 

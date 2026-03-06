@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from config import Config
 from pipeline.browser import BrowserController
 from pipeline.network import NetworkController, NetworkCondition
@@ -129,8 +131,9 @@ class Orchestrator:
             base_url = self.config.signaling_url_internal
 
             self.receiver.navigate(f"{base_url}/?role=receiver&room={room}")
-            time.sleep(1)
+            time.sleep(2)  # Let receiver's WebSocket connect before sender joins
             self.sender.navigate(f"{base_url}/?role=sender&room={room}")
+            time.sleep(1)  # Let sender's page settle before polling
 
             # --- Step 3: Wait for WebRTC connection ---
             sender_ok = self.sender.wait_for_connection(
@@ -200,6 +203,12 @@ class Orchestrator:
                 traffic_data, exp_dir, experiment_id
             )
 
+            # 12c: Save per-frame VMAF scores and frame timestamps as .npy
+            per_frame_vmaf_path = exp_dir / f"{experiment_id}_per_frame_vmaf.npy"
+            frame_times_path = exp_dir / f"{experiment_id}_frame_times.npy"
+            np.save(per_frame_vmaf_path, np.array(vmaf_result["per_frame_vmaf"], dtype=np.float64))
+            np.save(frame_times_path, np.array(vmaf_result["frame_times"], dtype=np.float64))
+
             # --- Step 13: Save experiment result ---
             result = {
                 "experiment_id": experiment_id,
@@ -214,6 +223,9 @@ class Orchestrator:
                 "traffic_duration_sec": traffic_data["duration_sec"],
                 "packet_sizes_file": str(traffic_paths["packet_sizes"]),
                 "inter_packet_times_file": str(traffic_paths["inter_packet_times"]),
+                "packet_timestamps_file": str(traffic_paths["packet_timestamps"]),
+                "per_frame_vmaf_file": str(per_frame_vmaf_path),
+                "frame_times_file": str(frame_times_path),
                 "recording_file": str(recording_path),
                 "pcap_file": str(pcap_local),
             }

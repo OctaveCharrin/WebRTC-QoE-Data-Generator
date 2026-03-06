@@ -79,7 +79,7 @@ class Config:
 
     # --- Experiment timing ---
     test_duration_sec: int = 30
-    webrtc_connect_timeout_sec: int = 30
+    webrtc_connect_timeout_sec: int = 45
     poll_interval_sec: float = 0.5
 
     # --- Chrome flags for the sender browser ---
@@ -94,6 +94,7 @@ class Config:
         "--ignore-certificate-errors",
         "--autoplay-policy=no-user-gesture-required",
         "--no-sandbox",
+        "--unsafely-treat-insecure-origin-as-secure=http://signaling:8080",
     ])
 
     # Receiver only needs basic flags (no fake media — it receives the stream)

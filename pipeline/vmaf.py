@@ -215,6 +215,127 @@ def detect_padding_boundaries(
 
 
 # ---------------------------------------------------------------------------
+# Frame comparison (alignment debugging)
+# ---------------------------------------------------------------------------
+
+
+def _save_rgb_as_png(rgb_array: np.ndarray, output_path: Path,
+                     width: int, height: int) -> None:
+    """Save a raw RGB numpy array as a PNG file using FFmpeg."""
+    cmd = [
+        "ffmpeg", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{width}x{height}",
+        "-i", "-",
+        "-f", "image2",
+        str(output_path),
+    ]
+    subprocess.run(cmd, input=rgb_array.tobytes(), check=True)
+
+
+def generate_frame_comparison(
+    trimmed_video: Path,
+    reference_video: Path,
+    output_dir: Path,
+    width: int,
+    height: int,
+    per_frame_vmaf: list[float] | None = None,
+    mean_vmaf: float | None = None,
+    step: int = 10,
+) -> Path:
+    """
+    Generate side-by-side frame comparison PNGs for alignment verification.
+
+    For every `step`th frame, extracts corresponding frames from the
+    trimmed received video and reference video, places them side-by-side,
+    and saves as a PNG with annotations.
+
+    Args:
+        trimmed_video: Path to the trimmed received Y4M (content only).
+        reference_video: Path to the reference Y4M (content only).
+        output_dir: Directory to save comparison PNGs.
+        width, height: Frame dimensions.
+        per_frame_vmaf: Optional VMAF scores per frame (for annotation).
+        mean_vmaf: Optional mean VMAF score (for annotation).
+        step: Extract every Nth frame (default: 10).
+
+    Returns:
+        Path to the output directory containing PNGs.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    trimmed_count = _get_frame_count(trimmed_video)
+    ref_count = _get_frame_count(reference_video)
+    frame_count = min(trimmed_count, ref_count)
+
+    separator_w = 4
+    bar_h = 40
+    composite_w = width * 2 + separator_w
+    composite_h = height + bar_h
+
+    generated = 0
+    for frame_idx in range(0, frame_count, step):
+        ref_frame = _extract_frame_rgb(reference_video, frame_idx, width, height)
+        rec_frame = _extract_frame_rgb(trimmed_video, frame_idx, width, height)
+
+        if ref_frame is None or rec_frame is None:
+            logger.warning(f"  Could not extract frame {frame_idx}, skipping")
+            continue
+
+        # Build composite: [reference] [separator] [received]
+        separator = np.zeros((height, separator_w, 3), dtype=np.uint8)
+        top = np.concatenate([ref_frame, separator, rec_frame], axis=1)
+
+        # Annotation bar (white background)
+        bar = np.full((bar_h, composite_w, 3), 255, dtype=np.uint8)
+        composite = np.concatenate([top, bar], axis=0)
+
+        # Save the raw composite first, then overlay text with ffmpeg
+        png_path = output_dir / f"frame_{frame_idx:04d}.png"
+        _save_rgb_as_png(composite, png_path, composite_w, composite_h)
+
+        # Build annotation text
+        vmaf_str = ""
+        if per_frame_vmaf is not None and frame_idx < len(per_frame_vmaf):
+            vmaf_str = f"    VMAF\\: {per_frame_vmaf[frame_idx]:.1f}"
+        mean_str = ""
+        if mean_vmaf is not None:
+            mean_str = f"    Mean\\: {mean_vmaf:.1f}"
+
+        text = (
+            f"Frame {frame_idx}/{frame_count}"
+            f"{vmaf_str}{mean_str}"
+            f"    [Reference (Sender)]  vs  [Received]"
+        )
+
+        # Overlay text annotation using ffmpeg drawtext
+        annotated_path = output_dir / f"frame_{frame_idx:04d}_tmp.png"
+        text_cmd = [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-i", str(png_path),
+            "-vf", (
+                f"drawtext=text='{text}':"
+                f"x=10:y={height + 8}:"
+                f"fontsize=18:fontcolor=black"
+            ),
+            str(annotated_path),
+        ]
+        result = subprocess.run(text_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            annotated_path.rename(png_path)
+        else:
+            # drawtext may fail if no fonts available; keep unannotated image
+            annotated_path.unlink(missing_ok=True)
+
+        generated += 1
+
+    logger.info(
+        f"Generated {generated} comparison frames in {output_dir}"
+    )
+    return output_dir
+
+
+# ---------------------------------------------------------------------------
 # VMAF computation
 # ---------------------------------------------------------------------------
 
@@ -250,9 +371,10 @@ def compute_vmaf(
 
     Returns:
         Dictionary with:
-          - mean_vmaf:       float (0-100)
-          - per_frame_vmaf:  list[float]
-          - frame_count:     int
+          - mean_vmaf:           float (0-100)
+          - per_frame_vmaf:      list[float] — VMAF score for each content frame
+          - frame_times:         list[float] — time in seconds of each frame (i / fps)
+          - frame_count:         int
           - content_start_frame: int (first content frame in received video)
           - content_end_frame:   int (last content frame in received video)
     """
@@ -314,7 +436,7 @@ def compute_vmaf(
         "-i", str(trimmed_y4m),        # distorted (received, trimmed)
         "-i", str(reference_video),     # reference (content only)
         "-lavfi",
-        f"libvmaf=log_path={output_json}:log_fmt=json",
+        f"libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1':log_path={output_json}:log_fmt=json",
         "-f", "null", "-",
     ]
     result = subprocess.run(vmaf_cmd, capture_output=True, text=True)
@@ -328,6 +450,7 @@ def compute_vmaf(
 
     per_frame = [frame["metrics"]["vmaf"] for frame in vmaf_data["frames"]]
     mean_vmaf = vmaf_data["pooled_metrics"]["vmaf"]["mean"]
+    frame_times = [i / fps for i in range(len(per_frame))]
 
     # Clean up intermediate files
     received_y4m.unlink(missing_ok=True)
@@ -337,6 +460,7 @@ def compute_vmaf(
     return {
         "mean_vmaf": mean_vmaf,
         "per_frame_vmaf": per_frame,
+        "frame_times": frame_times,
         "frame_count": len(per_frame),
         "content_start_frame": first_content,
         "content_end_frame": last_content,

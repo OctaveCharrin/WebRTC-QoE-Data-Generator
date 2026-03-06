@@ -48,10 +48,13 @@ echo "  Total      : ${TOTAL_SEC}s"
 echo "  Output dir : ${OUTPUT_DIR}"
 echo ""
 
-# --- Step 1: Download source video ------------------------------------------
+# --- Step 1: Get source video ------------------------------------------------
 SOURCE_FILE="${OUTPUT_DIR}/source.mp4"
 if [ -f "$SOURCE_FILE" ]; then
-    echo "[1/6] Source video already downloaded: ${SOURCE_FILE}"
+    echo "[1/6] Source video already exists: ${SOURCE_FILE}"
+elif [ -f "$VIDEO_SAMPLE_URL" ]; then
+    echo "[1/6] Copying local source video..."
+    cp "$VIDEO_SAMPLE_URL" "$SOURCE_FILE"
 else
     echo "[1/6] Downloading source video..."
     if command -v wget &> /dev/null; then

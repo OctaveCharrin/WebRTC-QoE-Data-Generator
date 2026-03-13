@@ -134,24 +134,16 @@ class Config:
     @property
     def frame_overlay_crop_height(self) -> int:
         """Height to crop from the bottom to remove frame number overlay."""
-        return self.calculate_crop_height()
+        return self.calculate_crop_height(self.video_height)
 
-    def calculate_crop_height(self) -> int:
+    def calculate_crop_height(self, height: int) -> int:
         """
         Calculate how many pixels to crop from the bottom of each frame.
 
-        The overlay is positioned at: y = height - (2 * fontsize) + offset
-        The box extends above by boxborderw and below by boxborderw.
-        We crop enough to remove the entire text + box.
+        Dynamically adapts to the video resolution to ensure the text 
+        box is fully removed, even for higher resolution inputs.
         """
-        # Line height approximates fontsize
-        line_height = self.overlay_fontsize
-        # Text baseline is at: height - (2 * line_height) + offset
-        # Box extends boxborderw pixels above and below the text
-        # So the bottom of the box is at: height - line_height + boxborderw
-        # (approximately, accounting for text metrics)
-        text_bottom = self.overlay_fontsize + self.overlay_boxborderw
-        return text_bottom
+        return int(height * 0.20)
 
     def calculate_mask_region(self, height: int, width: int) -> tuple[int, int, int, int]:
         """
@@ -160,25 +152,26 @@ class Config:
         Returns (x, y, box_width, box_height) for the white box containing frame numbers.
         The box is centered horizontally and positioned near the bottom.
 
-        The drawtext filter draws text centered at x = (w - tw) / 2,
-        where tw is the text width. For "9999" this is roughly 150-160 pixels.
-        Add boxborderw on each side.
+        The drawtext filter from generate_input_video.sh uses:
+        x=(w-tw)/2:y=h-(2*lh)+15:fontsize=40:boxborderw=10
         """
-        line_height = self.overlay_fontsize
-        # Approximate text width for frame numbers (4 digits, fontsize 40)
-        # This is roughly 150-160 pixels, but let's use a more conservative estimate
-        approx_text_width = self.overlay_fontsize * 4
+        # Estimate ffmpeg internal text metrics for fontsize=40 and ~4 digits ("9999")
+        # Line height (lh) is typically ~20% larger than fontsize
+        lh = int(self.overlay_fontsize * 1.2)
+        # Average character width for digits is roughly 60% of fontsize
+        approx_text_width = int(self.overlay_fontsize * 0.6 * 4)
 
         # Box dimensions
         box_width = approx_text_width + 2 * self.overlay_boxborderw
-        box_height = line_height + 2 * self.overlay_boxborderw
+        box_height = lh + 2 * self.overlay_boxborderw
 
         # Centered horizontally
         box_x = (width - box_width) // 2
 
-        # Position vertically: text is at y = h - (2*lh) + offset
-        # Box extends boxborderw above and below
-        overlay_y_offset = 15  # From generate_input_video.sh
-        box_y = height - 2 * line_height + overlay_y_offset - self.overlay_boxborderw
+        # Position vertically matching exactly: y = h - (2*lh) + 15
+        overlay_y_offset = 15
+        text_y = height - (2 * lh) + overlay_y_offset
+        # Box extends boxborderw above text_y
+        box_y = text_y - self.overlay_boxborderw
 
         return (box_x, box_y, box_width, box_height)

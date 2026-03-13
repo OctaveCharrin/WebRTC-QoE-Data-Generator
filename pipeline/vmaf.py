@@ -293,9 +293,10 @@ def generate_frame_comparison(
             ref_masked[y1:y2, x1:x2, :] = 255
             rec_masked[y1:y2, x1:x2, :] = 255
         else:
-            # Fall back to cropping if no mask region provided
-            ref_masked[frame_overlay_crop_height:, :, :] = 255
-            rec_masked[frame_overlay_crop_height:, :, :] = 255
+            # Fall back to masking the bottom region (if no mask region provided)
+            mask_y_start = height - frame_overlay_crop_height
+            ref_masked[mask_y_start:, :, :] = 255
+            rec_masked[mask_y_start:, :, :] = 255
         row3_pair = np.concatenate([ref_masked, sep_full, rec_masked], axis=1)
 
         # --- Build row labels (gray background) ---

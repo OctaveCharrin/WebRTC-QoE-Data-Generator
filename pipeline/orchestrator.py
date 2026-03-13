@@ -271,9 +271,12 @@ class Orchestrator:
             with open(exp_dir / "result.json", "w") as f:
                 json.dump(result, f, indent=2)
 
+            vmaf_c_str = f"{vmaf_result['mean_vmaf']:.2f}" if vmaf_result['mean_vmaf'] is not None else "N/A"
+            vmaf_m_str = f"{vmaf_result['mean_vmaf_masked']:.2f}" if vmaf_result['mean_vmaf_masked'] is not None else "N/A"
+
             logger.info(
-                f"Result: VMAF(cropped)={vmaf_result['mean_vmaf']:.2f if vmaf_result['mean_vmaf'] else 'N/A'}, "
-                f"VMAF(masked)={vmaf_result['mean_vmaf_masked']:.2f if vmaf_result['mean_vmaf_masked'] else 'N/A'}, "
+                f"Result: VMAF(cropped)={vmaf_c_str}, "
+                f"VMAF(masked)={vmaf_m_str}, "
                 f"packets={traffic_data['total_packets']}, "
                 f"frames={vmaf_result['frame_count']}"
             )

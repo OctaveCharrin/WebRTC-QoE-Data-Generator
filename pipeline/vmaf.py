@@ -166,10 +166,7 @@ def detect_padding_boundaries(
             if not _is_padding_frame(frame, width, height, threshold):
                 first_content = i
                 break
-        logger.info(
-            f"  Content starts at frame {first_content} "
-            f"(expected ~{expected_padding_frames})"
-        )
+        logger.info(f"  Content starts at frame {first_content}")
     else:
         logger.info("  No padding detected at start, content starts at frame 0")
 
@@ -186,10 +183,7 @@ def detect_padding_boundaries(
             if not _is_padding_frame(frame, width, height, threshold):
                 last_content = i
                 break
-        logger.info(
-            f"  Content ends at frame {last_content} "
-            f"(expected ~{total_frames - expected_padding_frames})"
-        )
+        logger.info(f"  Content ends at frame {last_content}")
     else:
         logger.info(
             f"  No padding detected at end, content ends at frame {last_content}"
@@ -229,28 +223,22 @@ def generate_frame_comparison(
     output_dir: Path,
     width: int,
     height: int,
+    frame_overlay_crop_height: int = 80,
     per_frame_vmaf: list[float] | None = None,
     mean_vmaf: float | None = None,
+    per_frame_vmaf_masked: list[float] | None = None,
+    mean_vmaf_masked: float | None = None,
     step: int = 10,
+    mask_region: tuple[int, int, int, int] | None = None,
 ) -> Path:
     """
-    Generate side-by-side frame comparison PNGs for alignment verification.
+    Generate debug comparison PNGs with 3 rows per frame.
 
-    For every `step`th frame, extracts corresponding frames from the
-    trimmed received video and reference video, places them side-by-side,
-    and saves as a PNG with annotations.
-
-    Args:
-        trimmed_video: Path to the trimmed received Y4M (content only).
-        reference_video: Path to the reference Y4M (content only).
-        output_dir: Directory to save comparison PNGs.
-        width, height: Frame dimensions.
-        per_frame_vmaf: Optional VMAF scores per frame (for annotation).
-        mean_vmaf: Optional mean VMAF score (for annotation).
-        step: Extract every Nth frame (default: 10).
-
-    Returns:
-        Path to the output directory containing PNGs.
+    Layout per PNG (6 frames total):
+      Row 1: Original  — [Reference] | [Received]   (with frame number overlay)
+      Row 2: Cropped   — [Reference] | [Received]   (bottom cropped, + VMAF)
+      Row 3: Masked    — [Reference] | [Received]   (white box over overlay, + VMAF)
+      Bottom: Annotation bar with frame info and mean scores.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -259,9 +247,19 @@ def generate_frame_comparison(
     frame_count = min(trimmed_count, ref_count)
 
     separator_w = 4
+    row_label_h = 24
     bar_h = 40
-    composite_w = width * 2 + separator_w
-    composite_h = height + bar_h
+    cropped_h = height - frame_overlay_crop_height
+    pair_w = width * 2 + separator_w
+
+    # Total composite height: 3 rows with labels + annotation bar
+    composite_h = (
+        row_label_h + height +           # row 1: original
+        row_label_h + cropped_h +         # row 2: cropped
+        row_label_h + height +            # row 3: masked
+        bar_h                             # annotation bar
+    )
+    composite_w = pair_w
 
     generated = 0
     for frame_idx in range(0, frame_count, step):
@@ -272,49 +270,104 @@ def generate_frame_comparison(
             logger.warning(f"  Could not extract frame {frame_idx}, skipping")
             continue
 
-        # Build composite: [reference] [separator] [received]
-        separator = np.zeros((height, separator_w, 3), dtype=np.uint8)
-        top = np.concatenate([ref_frame, separator, rec_frame], axis=1)
+        sep_full = np.zeros((height, separator_w, 3), dtype=np.uint8)
+        sep_cropped = np.zeros((cropped_h, separator_w, 3), dtype=np.uint8)
 
-        # Annotation bar (white background)
-        bar = np.full((bar_h, composite_w, 3), 255, dtype=np.uint8)
-        composite = np.concatenate([top, bar], axis=0)
+        # --- Row 1: Original frames ---
+        row1_pair = np.concatenate([ref_frame, sep_full, rec_frame], axis=1)
 
-        # Save the raw composite first, then overlay text with ffmpeg
+        # --- Row 2: Cropped frames (remove bottom overlay region) ---
+        ref_cropped = ref_frame[:cropped_h, :, :]
+        rec_cropped = rec_frame[:cropped_h, :, :]
+        row2_pair = np.concatenate([ref_cropped, sep_cropped, rec_cropped], axis=1)
+
+        # --- Row 3: Masked frames (white box over overlay region) ---
+        ref_masked = ref_frame.copy()
+        rec_masked = rec_frame.copy()
+        if mask_region is not None:
+            # Mask only the overlay box region
+            x, y, box_w, box_h = mask_region
+            # Clamp to frame bounds
+            x1, x2 = max(0, x), min(width, x + box_w)
+            y1, y2 = max(0, y), min(height, y + box_h)
+            ref_masked[y1:y2, x1:x2, :] = 255
+            rec_masked[y1:y2, x1:x2, :] = 255
+        else:
+            # Fall back to cropping if no mask region provided
+            ref_masked[frame_overlay_crop_height:, :, :] = 255
+            rec_masked[frame_overlay_crop_height:, :, :] = 255
+        row3_pair = np.concatenate([ref_masked, sep_full, rec_masked], axis=1)
+
+        # --- Build row labels (gray background) ---
+        def _make_label(text: str, h: int = row_label_h) -> np.ndarray:
+            # Gray bar; text will be overlaid by ffmpeg drawtext later
+            bar = np.full((h, composite_w, 3), 220, dtype=np.uint8)
+            return bar
+
+        # Build VMAF annotation strings for row labels
+        crop_vmaf_str = ""
+        if per_frame_vmaf is not None and frame_idx < len(per_frame_vmaf):
+            crop_vmaf_str = f" - VMAF: {per_frame_vmaf[frame_idx]:.1f}"
+        mask_vmaf_str = ""
+        if per_frame_vmaf_masked is not None and frame_idx < len(per_frame_vmaf_masked):
+            mask_vmaf_str = f" - VMAF: {per_frame_vmaf_masked[frame_idx]:.1f}"
+
+        label1 = _make_label("Original")
+        label2 = _make_label(f"Cropped{crop_vmaf_str}")
+        label3 = _make_label(f"Masked{mask_vmaf_str}")
+
+        # --- Bottom annotation bar ---
+        bottom_bar = np.full((bar_h, composite_w, 3), 255, dtype=np.uint8)
+
+        # --- Assemble composite ---
+        composite = np.concatenate([
+            label1, row1_pair,
+            label2, row2_pair,
+            label3, row3_pair,
+            bottom_bar,
+        ], axis=0)
+
         png_path = output_dir / f"frame_{frame_idx:04d}.png"
         _save_rgb_as_png(composite, png_path, composite_w, composite_h)
 
-        # Build annotation text
-        vmaf_str = ""
-        if per_frame_vmaf is not None and frame_idx < len(per_frame_vmaf):
-            vmaf_str = f"    VMAF\\: {per_frame_vmaf[frame_idx]:.1f}"
-        mean_str = ""
-        if mean_vmaf is not None:
-            mean_str = f"    Mean\\: {mean_vmaf:.1f}"
+        # --- Overlay text annotations with ffmpeg drawtext ---
+        mean_crop_str = f"  Mean cropped\\: {mean_vmaf:.1f}" if mean_vmaf is not None else ""
+        mean_mask_str = f"  Mean masked\\: {mean_vmaf_masked:.1f}" if mean_vmaf_masked is not None else ""
 
-        text = (
+        # Escape colons for ffmpeg drawtext
+        crop_vmaf_esc = crop_vmaf_str.replace(":", "\\:")
+        mask_vmaf_esc = mask_vmaf_str.replace(":", "\\:")
+
+        # Y offsets for each row label
+        y_label1 = 4
+        y_label2 = row_label_h + height + 4
+        y_label3 = row_label_h + height + row_label_h + cropped_h + 4
+        y_bottom = composite_h - bar_h + 8
+
+        bottom_text = (
             f"Frame {frame_idx}/{frame_count}"
-            f"{vmaf_str}{mean_str}"
+            f"{mean_crop_str}{mean_mask_str}"
             f"    [Reference (Sender)]  vs  [Received]"
         )
 
-        # Overlay text annotation using ffmpeg drawtext
+        drawtext_filters = (
+            f"drawtext=text='Original':x=10:y={y_label1}:fontsize=16:fontcolor=black,"
+            f"drawtext=text='Cropped{crop_vmaf_esc}':x=10:y={y_label2}:fontsize=16:fontcolor=black,"
+            f"drawtext=text='Masked{mask_vmaf_esc}':x=10:y={y_label3}:fontsize=16:fontcolor=black,"
+            f"drawtext=text='{bottom_text}':x=10:y={y_bottom}:fontsize=18:fontcolor=black"
+        )
+
         annotated_path = output_dir / f"frame_{frame_idx:04d}_tmp.png"
         text_cmd = [
             "ffmpeg", "-loglevel", "error", "-y",
             "-i", str(png_path),
-            "-vf", (
-                f"drawtext=text='{text}':"
-                f"x=10:y={height + 8}:"
-                f"fontsize=18:fontcolor=black"
-            ),
+            "-vf", drawtext_filters,
             str(annotated_path),
         ]
         result = subprocess.run(text_cmd, capture_output=True, text=True)
         if result.returncode == 0:
             annotated_path.rename(png_path)
         else:
-            # drawtext may fail if no fonts available; keep unannotated image
             annotated_path.unlink(missing_ok=True)
 
         generated += 1
@@ -336,10 +389,13 @@ def compute_vmaf(
     width: int = 640,
     height: int = 480,
     fps: int = 24,
+    frame_overlay_crop_height: int = 80,
     padding_duration_sec: int = 5,
     padding_threshold: int = 50,
     debug_dir: Path | None = None,
     debug_frame_step: int = 10,
+    vmaf_mode: str = "both",
+    mask_region: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """
     Compute VMAF score with automatic padding removal and alignment.
@@ -348,29 +404,38 @@ def compute_vmaf(
       1. Convert received WebM to Y4M (normalize resolution/fps)
       2. Detect padding boundaries in the received video
       3. Trim the received video to content-only region
-      4. Compute VMAF comparing trimmed received vs reference
+      4. Compute VMAF comparing trimmed received vs reference (one or both modes)
 
     The reference video should already be content-only (no padding).
 
     Args:
         received_video: Path to the recorded WebM from the receiver.
         reference_video: Path to the reference Y4M (content only, no padding).
-        output_json: Where to write the VMAF JSON results.
+        output_json: Where to write the VMAF JSON results (cropped).
         width, height: Target dimensions for comparison.
         fps: Target frame rate for comparison.
+        frame_overlay_crop_height: Pixels to crop from the bottom of each frame
+            before VMAF comparison. Removes the burned-in frame number overlay
+            so that ±1 frame alignment errors don't penalize VMAF scores.
+            Set to 0 to disable cropping.
         padding_duration_sec: Expected padding duration per side (hint for detection).
         padding_threshold: RGB threshold for padding color matching.
         debug_dir: If set, generate side-by-side frame comparison PNGs here.
         debug_frame_step: Extract every Nth frame for debug comparison.
+        vmaf_mode: "cropped" (crop overlay), "masked" (white box), or "both" (default).
+        mask_region: (x, y, w, h) tuple for the overlay box. If None, falls back to
+            cropping-based masking.
 
     Returns:
         Dictionary with:
-          - mean_vmaf:           float (0-100)
-          - per_frame_vmaf:      list[float] — VMAF score for each content frame
-          - frame_times:         list[float] — time in seconds of each frame (i / fps)
-          - frame_count:         int
-          - content_start_frame: int (first content frame in received video)
-          - content_end_frame:   int (last content frame in received video)
+          - mean_vmaf:              float — cropped VMAF mean (0-100), or 0.0 if not computed
+          - per_frame_vmaf:         list[float] — cropped VMAF per frame (empty list if not computed)
+          - mean_vmaf_masked:       float — masked VMAF mean (0-100), or 0.0 if not computed
+          - per_frame_vmaf_masked:  list[float] — masked VMAF per frame (empty list if not computed)
+          - frame_times:            list[float] — time in seconds (i / fps)
+          - frame_count:            int
+          - content_start_frame:    int
+          - content_end_frame:      int
     """
     output_json.parent.mkdir(parents=True, exist_ok=True)
 
@@ -419,32 +484,94 @@ def compute_vmaf(
         logger.error(f"FFmpeg trim failed: {result.stderr}")
         raise RuntimeError(f"FFmpeg trim failed: {result.stderr}")
 
-    # --- Step 4: Compute VMAF ---
+    # --- Step 4: Compute VMAF (one or both methods) ---
     # The reference is content-only. The trimmed received is now also content-only.
     # FFmpeg's libvmaf will compare frame-by-frame in order.
     # If the received video has fewer frames (due to drops), libvmaf compares
     # up to the shorter of the two.
-    logger.info("Computing VMAF (trimmed received vs reference)...")
-    vmaf_cmd = [
-        "ffmpeg", "-loglevel", "error", "-y",
-        "-i", str(trimmed_y4m),        # distorted (received, trimmed)
-        "-i", str(reference_video),     # reference (content only)
-        "-lavfi",
-        f"libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1':log_path={output_json}:log_fmt=json",
-        "-f", "null", "-",
-    ]
-    result = subprocess.run(vmaf_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.error(f"VMAF computation failed: {result.stderr}")
-        raise RuntimeError(f"VMAF computation failed: {result.stderr}")
+    #
+    # We can compute VMAF in up to two modes, excluding the burned-in frame number overlay:
+    #   - Cropped: remove the bottom N pixels entirely
+    #   - Masked: paint a white box over the overlay region (preserves dimensions)
+    # The vmaf_mode parameter controls which to compute.
 
-    # --- Step 5: Parse results ---
-    with open(output_json) as f:
-        vmaf_data = json.load(f)
+    def _run_vmaf(lavfi: str, json_path: Path, label: str) -> tuple[list[float], float]:
+        """Run a single VMAF computation and return (per_frame, mean)."""
+        cmd = [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-i", str(trimmed_y4m),
+            "-i", str(reference_video),
+            "-lavfi", lavfi,
+            "-f", "null", "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            logger.error(f"VMAF ({label}) failed: {res.stderr}")
+            raise RuntimeError(f"VMAF ({label}) failed: {res.stderr}")
+        with open(json_path) as fh:
+            data = json.load(fh)
+        pf = [frame["metrics"]["vmaf"] for frame in data["frames"]]
+        mn = data["pooled_metrics"]["vmaf"]["mean"]
+        return pf, mn
 
-    per_frame = [frame["metrics"]["vmaf"] for frame in vmaf_data["frames"]]
-    mean_vmaf = vmaf_data["pooled_metrics"]["vmaf"]["mean"]
-    frame_times = [i / fps for i in range(len(per_frame))]
+    per_frame_cropped = []
+    mean_vmaf_cropped = 0.0
+    per_frame_masked = []
+    mean_vmaf_masked = 0.0
+
+    # Compute cropped VMAF if requested
+    if vmaf_mode in ("cropped", "both"):
+        logger.info("Computing VMAF with cropped overlay region...")
+        if frame_overlay_crop_height > 0:
+            crop = f"crop=iw:ih-{frame_overlay_crop_height}:0:0"
+            cropped_lavfi = (
+                f"[0:v]{crop}[distorted];"
+                f"[1:v]{crop}[ref];"
+                f"[distorted][ref]libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1'"
+                f":log_path={output_json}:log_fmt=json"
+            )
+        else:
+            cropped_lavfi = (
+                f"libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1'"
+                f":log_path={output_json}:log_fmt=json"
+            )
+        per_frame_cropped, mean_vmaf_cropped = _run_vmaf(
+            cropped_lavfi, output_json, "cropped"
+        )
+
+    # Compute masked VMAF if requested
+    if vmaf_mode in ("masked", "both"):
+        masked_json = output_json.with_name(output_json.stem + "_masked.json")
+        logger.info("Computing VMAF with white-box masked overlay region...")
+        if frame_overlay_crop_height > 0:
+            # If mask_region is provided, create a drawbox filter for just that region
+            if mask_region is not None:
+                x, y, box_w, box_h = mask_region
+                box = (f"drawbox=x={x}:y={y}:w={box_w}:h={box_h}:"
+                       f"color=white:t=fill")
+            else:
+                # Fall back to masking the bottom portion
+                box = f"drawbox=x=0:y=ih-{frame_overlay_crop_height}:w=iw:h={frame_overlay_crop_height}:color=white:t=fill"
+            masked_lavfi = (
+                f"[0:v]{box}[distorted];"
+                f"[1:v]{box}[ref];"
+                f"[distorted][ref]libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1'"
+                f":log_path={masked_json}:log_fmt=json"
+            )
+        else:
+            masked_lavfi = (
+                f"libvmaf=model='version=vmaf_v0.6.1\\:phone_model=1'"
+                f":log_path={masked_json}:log_fmt=json"
+            )
+        per_frame_masked, mean_vmaf_masked = _run_vmaf(
+            masked_lavfi, masked_json, "masked"
+        )
+    else:
+        masked_json = None
+
+    # --- Step 5: Derive frame times ---
+    frame_count = len(per_frame_cropped) if per_frame_cropped else len(per_frame_masked)
+    frame_times = [i / fps for i in range(frame_count)]
 
     # --- Optional: generate debug frame comparison ---
     if debug_dir is not None:
@@ -455,21 +582,30 @@ def compute_vmaf(
             output_dir=debug_dir,
             width=width,
             height=height,
-            per_frame_vmaf=per_frame,
-            mean_vmaf=mean_vmaf,
+            frame_overlay_crop_height=frame_overlay_crop_height,
+            per_frame_vmaf=per_frame_cropped if per_frame_cropped else None,
+            mean_vmaf=mean_vmaf_cropped if per_frame_cropped else None,
+            per_frame_vmaf_masked=per_frame_masked if per_frame_masked else None,
+            mean_vmaf_masked=mean_vmaf_masked if per_frame_masked else None,
             step=debug_frame_step,
+            mask_region=mask_region,
         )
 
     # Clean up intermediate files
     received_y4m.unlink(missing_ok=True)
     trimmed_y4m.unlink(missing_ok=True)
 
-    logger.info(f"VMAF: mean={mean_vmaf:.2f}, frames={len(per_frame)}")
+    logger.info(
+        f"VMAF: cropped={mean_vmaf_cropped:.2f}, "
+        f"masked={mean_vmaf_masked:.2f}, frames={frame_count}"
+    )
     return {
-        "mean_vmaf": mean_vmaf,
-        "per_frame_vmaf": per_frame,
+        "mean_vmaf": mean_vmaf_cropped,
+        "per_frame_vmaf": per_frame_cropped,
+        "mean_vmaf_masked": mean_vmaf_masked,
+        "per_frame_vmaf_masked": per_frame_masked,
         "frame_times": frame_times,
-        "frame_count": len(per_frame),
+        "frame_count": frame_count,
         "content_start_frame": first_content,
         "content_end_frame": last_content,
     }

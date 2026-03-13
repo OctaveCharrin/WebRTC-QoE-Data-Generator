@@ -205,6 +205,12 @@ class Orchestrator:
             # 12a: Compute VMAF
             reference_video = self.config.media_dir / "reference.y4m"
             debug_dir = exp_dir / "debug_frames" if self.config.debug_frames else None
+
+            # Calculate mask region for the overlay box
+            mask_region = self.config.calculate_mask_region(
+                self.config.video_height, self.config.video_width
+            )
+
             vmaf_result = compute_vmaf(
                 received_video=recording_path,
                 reference_video=reference_video,
@@ -212,10 +218,13 @@ class Orchestrator:
                 width=self.config.video_width,
                 height=self.config.video_height,
                 fps=self.config.video_fps,
+                frame_overlay_crop_height=self.config.frame_overlay_crop_height,
                 padding_duration_sec=self.config.padding_duration_sec,
                 padding_threshold=self.config.padding_color_threshold,
                 debug_dir=debug_dir,
                 debug_frame_step=self.config.debug_frame_step,
+                vmaf_mode=self.config.vmaf_mode,
+                mask_region=mask_region,
             )
 
             # 12b: Parse pcap and extract traffic features
@@ -226,8 +235,14 @@ class Orchestrator:
 
             # 12c: Save per-frame VMAF scores and frame timestamps as .npy
             per_frame_vmaf_path = exp_dir / f"{experiment_id}_per_frame_vmaf.npy"
+            per_frame_vmaf_masked_path = exp_dir / f"{experiment_id}_per_frame_vmaf_masked.npy"
             frame_times_path = exp_dir / f"{experiment_id}_frame_times.npy"
-            np.save(per_frame_vmaf_path, np.array(vmaf_result["per_frame_vmaf"], dtype=np.float64))
+
+            # Save per-frame VMAF only if computed
+            if vmaf_result["per_frame_vmaf"]:
+                np.save(per_frame_vmaf_path, np.array(vmaf_result["per_frame_vmaf"], dtype=np.float64))
+            if vmaf_result["per_frame_vmaf_masked"]:
+                np.save(per_frame_vmaf_masked_path, np.array(vmaf_result["per_frame_vmaf_masked"], dtype=np.float64))
             np.save(frame_times_path, np.array(vmaf_result["frame_times"], dtype=np.float64))
 
             # --- Step 13: Save experiment result ---
@@ -238,14 +253,16 @@ class Orchestrator:
                 "jitter_ms": condition.jitter_ms,
                 "bandwidth_kbps": condition.bandwidth_kbps,
                 "repeat": repeat,
-                "mean_vmaf": vmaf_result["mean_vmaf"],
+                "mean_vmaf": vmaf_result["mean_vmaf"] if vmaf_result["mean_vmaf"] else None,
+                "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] if vmaf_result["mean_vmaf_masked"] else None,
                 "frame_count": vmaf_result["frame_count"],
                 "packet_count": traffic_data["total_packets"],
                 "traffic_duration_sec": traffic_data["duration_sec"],
                 "packet_sizes_file": str(traffic_paths["packet_sizes"]),
                 "inter_packet_times_file": str(traffic_paths["inter_packet_times"]),
                 "packet_timestamps_file": str(traffic_paths["packet_timestamps"]),
-                "per_frame_vmaf_file": str(per_frame_vmaf_path),
+                "per_frame_vmaf_file": str(per_frame_vmaf_path) if vmaf_result["per_frame_vmaf"] else None,
+                "per_frame_vmaf_masked_file": str(per_frame_vmaf_masked_path) if vmaf_result["per_frame_vmaf_masked"] else None,
                 "frame_times_file": str(frame_times_path),
                 "recording_file": str(recording_path),
                 "pcap_file": str(pcap_local),
@@ -255,7 +272,8 @@ class Orchestrator:
                 json.dump(result, f, indent=2)
 
             logger.info(
-                f"Result: VMAF={vmaf_result['mean_vmaf']:.2f}, "
+                f"Result: VMAF(cropped)={vmaf_result['mean_vmaf']:.2f if vmaf_result['mean_vmaf'] else 'N/A'}, "
+                f"VMAF(masked)={vmaf_result['mean_vmaf_masked']:.2f if vmaf_result['mean_vmaf_masked'] else 'N/A'}, "
                 f"packets={traffic_data['total_packets']}, "
                 f"frames={vmaf_result['frame_count']}"
             )

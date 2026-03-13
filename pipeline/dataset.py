@@ -36,9 +36,14 @@ def build_dataset(output_dir: Path, dataset_dir: Path) -> Path:
     Output:
         dataset_dir/dataset.csv with columns:
           experiment_id, loss_percent, delay_ms, jitter_ms, bandwidth_kbps,
-          repeat, mean_vmaf, frame_count, packet_count, traffic_duration_sec,
-          packet_sizes_file, inter_packet_times_file, packet_timestamps_file,
-          per_frame_vmaf_file, frame_times_file, recording_file, pcap_file
+          repeat, mean_vmaf, mean_vmaf_masked, frame_count, packet_count,
+          traffic_duration_sec, packet_sizes_file, inter_packet_times_file,
+          packet_timestamps_file, per_frame_vmaf_file, per_frame_vmaf_masked_file,
+          frame_times_file, recording_file, pcap_file
+
+    Notes:
+        - Experiments can have one or both VMAF scores depending on vmaf_mode setting.
+        - mean_vmaf or mean_vmaf_masked may be None/null if not computed.
 
     Returns:
         Path to the generated CSV file.
@@ -74,9 +79,22 @@ def build_dataset(output_dir: Path, dataset_dir: Path) -> Path:
     # Print summary statistics
     logger.info(f"Dataset built: {csv_path}")
     logger.info(f"  Experiments : {len(df)}")
-    if "mean_vmaf" in df.columns and len(df) > 0:
-        logger.info(f"  VMAF range  : {df['mean_vmaf'].min():.1f} - {df['mean_vmaf'].max():.1f}")
-        logger.info(f"  VMAF mean   : {df['mean_vmaf'].mean():.1f}")
+    
+    if len(df) > 0:
+        if "mean_vmaf" in df.columns:
+            vmaf_count = df["mean_vmaf"].notna().sum()
+            logger.info(f"  VMAF (cropped)  : {vmaf_count} experiments")
+            if vmaf_count > 0:
+                logger.info(f"    Range: {df['mean_vmaf'].min():.1f} - {df['mean_vmaf'].max():.1f}")
+                logger.info(f"    Mean:  {df['mean_vmaf'].mean():.1f}")
+        
+        if "mean_vmaf_masked" in df.columns:
+            vmaf_masked_count = df["mean_vmaf_masked"].notna().sum()
+            logger.info(f"  VMAF (masked)   : {vmaf_masked_count} experiments")
+            if vmaf_masked_count > 0:
+                logger.info(f"    Range: {df['mean_vmaf_masked'].min():.1f} - {df['mean_vmaf_masked'].max():.1f}")
+                logger.info(f"    Mean:  {df['mean_vmaf_masked'].mean():.1f}")
+
     if "loss_percent" in df.columns:
         conditions = df.groupby(
             ["loss_percent", "delay_ms", "jitter_ms"]
@@ -97,9 +115,11 @@ def load_experiment(dataset_csv: Path, experiment_id: str) -> dict:
           - packet_sizes: np.ndarray (N,)
           - inter_packet_times: np.ndarray (N,)
           - packet_timestamps: np.ndarray (N,) — seconds from first packet
-          - per_frame_vmaf: np.ndarray (F,) — VMAF per content frame
+          - per_frame_vmaf: np.ndarray (F,) — VMAF per content frame (cropped)
+          - per_frame_vmaf_masked: np.ndarray (F,) — masked VMAF (if available)
           - frame_times: np.ndarray (F,) — seconds from content start (i / fps)
-          - mean_vmaf: float
+          - mean_vmaf: float (cropped) or None
+          - mean_vmaf_masked: float (masked) or None
           - metadata: dict (all CSV columns)
     """
     df = pd.read_csv(dataset_csv)
@@ -111,7 +131,8 @@ def load_experiment(dataset_csv: Path, experiment_id: str) -> dict:
     result = {
         "packet_sizes": np.load(row["packet_sizes_file"]),
         "inter_packet_times": np.load(row["inter_packet_times_file"]),
-        "mean_vmaf": float(row["mean_vmaf"]),
+        "mean_vmaf": float(row["mean_vmaf"]) if "mean_vmaf" in row and pd.notna(row["mean_vmaf"]) else None,
+        "mean_vmaf_masked": float(row["mean_vmaf_masked"]) if "mean_vmaf_masked" in row and pd.notna(row["mean_vmaf_masked"]) else None,
         "metadata": row.to_dict(),
     }
 
@@ -119,6 +140,7 @@ def load_experiment(dataset_csv: Path, experiment_id: str) -> dict:
     for key, col in [
         ("packet_timestamps", "packet_timestamps_file"),
         ("per_frame_vmaf", "per_frame_vmaf_file"),
+        ("per_frame_vmaf_masked", "per_frame_vmaf_masked_file"),
         ("frame_times", "frame_times_file"),
     ]:
         if col in row and pd.notna(row[col]):
@@ -140,17 +162,35 @@ def dataset_summary(dataset_csv: Path) -> str:
     if len(df) == 0:
         return "\n".join(lines + ["(empty)"])
 
-    lines.append("VMAF distribution:")
-    lines.append(f"  Min    : {df['mean_vmaf'].min():.1f}")
-    lines.append(f"  Mean   : {df['mean_vmaf'].mean():.1f}")
-    lines.append(f"  Median : {df['mean_vmaf'].median():.1f}")
-    lines.append(f"  Max    : {df['mean_vmaf'].max():.1f}")
-    lines.append(f"  Std    : {df['mean_vmaf'].std():.1f}")
-    lines.append("")
+    if "mean_vmaf" in df:
+        lines.append("VMAF (cropped) distribution:")
+        lines.append(f"  Count  : {df['mean_vmaf'].notna().sum()}")
+        lines.append(f"  Min    : {df['mean_vmaf'].min():.1f}")
+        lines.append(f"  Mean   : {df['mean_vmaf'].mean():.1f}")
+        lines.append(f"  Median : {df['mean_vmaf'].median():.1f}")
+        lines.append(f"  Max    : {df['mean_vmaf'].max():.1f}")
+        lines.append(f"  Std    : {df['mean_vmaf'].std():.1f}")
+        lines.append("")
+
+    if "mean_vmaf_masked" in df:
+        lines.append("VMAF (masked) distribution:")
+        lines.append(f"  Count  : {df['mean_vmaf_masked'].notna().sum()}")
+        lines.append(f"  Min    : {df['mean_vmaf_masked'].min():.1f}")
+        lines.append(f"  Mean   : {df['mean_vmaf_masked'].mean():.1f}")
+        lines.append(f"  Median : {df['mean_vmaf_masked'].median():.1f}")
+        lines.append(f"  Max    : {df['mean_vmaf_masked'].max():.1f}")
+        lines.append(f"  Std    : {df['mean_vmaf_masked'].std():.1f}")
+        lines.append("")
 
     lines.append("Breakdown by packet loss:")
     for loss, group in df.groupby("loss_percent"):
-        vmaf_mean = group["mean_vmaf"].mean()
-        lines.append(f"  loss={loss:5.1f}%  n={len(group):3d}  VMAF={vmaf_mean:.1f}")
+        stats = f"  loss={loss:5.1f}%  n={len(group):3d}"
+        if "mean_vmaf" in df:
+            vmaf_mean = group["mean_vmaf"].mean()
+            stats += f"  VMAF(crop)={vmaf_mean:.1f}"
+        if "mean_vmaf_masked" in df:
+            vmaf_masked_mean = group["mean_vmaf_masked"].mean()
+            stats += f"  VMAF(mask)={vmaf_masked_mean:.1f}"
+        lines.append(stats)
 
     return "\n".join(lines)

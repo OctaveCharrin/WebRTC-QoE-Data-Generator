@@ -100,6 +100,7 @@ Options:
 - `--bandwidth`: Bandwidth limits in kbps (0 = unlimited)
 - `--repeats`: Number of repeats per condition
 - `--duration`: Recording duration in seconds
+- `--vmaf-mode`: Mode to compute vmaf: choose between 'cropped', 'masked', or 'both' (default)
 - `--resume / --no-resume`: Skip already-completed experiments (default: resume)
 - `--debug-frames`: Generate side-by-side frame comparison PNGs for alignment verification
 - `-v`: Verbose debug logging
@@ -163,7 +164,8 @@ output/
     ..._packet_sizes.npy    # numpy array: packet sizes
     ..._inter_packet_times.npy  # numpy array: inter-packet gaps
     ..._packet_timestamps.npy   # numpy array: seconds from first packet
-    ..._per_frame_vmaf.npy      # numpy array: VMAF per content frame
+    ..._per_frame_vmaf.npy      # numpy array: VMAF per content frame (cropped)
+    ..._per_frame_vmaf_masked.npy      # numpy array: VMAF per content frame (masked)
     ..._frame_times.npy         # numpy array: seconds from content start
     debug_frames/           # (optional) side-by-side alignment PNGs
       frame_0000.png
@@ -183,14 +185,16 @@ output/
 | `jitter_ms` | Applied jitter ms |
 | `bandwidth_kbps` | Applied bandwidth limit (0 = unlimited) |
 | `repeat` | Repeat index |
-| `mean_vmaf` | Mean VMAF score (0-100, higher = better) |
+| `mean_vmaf` | Mean VMAF score (cropped) (0-100, higher = better) |
+| `mean_vmaf_masked` | Mean VMAF score (masked) (0-100, higher = better) |
 | `frame_count` | Number of video frames compared |
 | `packet_count` | Number of UDP packets captured |
 | `traffic_duration_sec` | Duration of the traffic capture |
 | `packet_sizes_file` | Path to .npy with packet sizes array |
 | `inter_packet_times_file` | Path to .npy with inter-packet times array |
 | `packet_timestamps_file` | Path to .npy with packet times (seconds from first packet) |
-| `per_frame_vmaf_file` | Path to .npy with per-frame VMAF scores |
+| `per_frame_vmaf_file` | Path to .npy with per-frame VMAF scores (cropped) |
+| `per_frame_vmaf_masked_file` | Path to .npy with per-frame VMAF scores (masked) |
 | `frame_times_file` | Path to .npy with frame times (seconds from content start) |
 
 ### Loading data for model training
@@ -204,7 +208,10 @@ df = pd.read_csv("output/dataset/dataset.csv")
 for _, row in df.iterrows():
     sizes = np.load(row["packet_sizes_file"])           # shape: (N,)
     timings = np.load(row["inter_packet_times_file"])    # shape: (N,)
-    vmaf = row["mean_vmaf"]                              # float, 0-100
+    
+    # Optional handling of which VMAF score metric was generated
+    vmaf = row["mean_vmaf"]                              # float, 0-100 (cropped)
+    # vmaf_masked = row["mean_vmaf_masked"]              # float, 0-100 (masked)
     # Feed into your model...
 ```
 
@@ -225,6 +232,7 @@ packet_sizes = np.load(row["packet_sizes_file"])          # (N,) int32
 packet_times = np.load(row["packet_timestamps_file"])     # (N,) float64, seconds
 
 # Per-frame VMAF with timestamps (t=0 at content start)
+# Note: Can use "per_frame_vmaf_masked_file" if vmaf-mode was set to 'masked'
 frame_vmaf = np.load(row["per_frame_vmaf_file"])          # (F,) float64, 0-100
 frame_times = np.load(row["frame_times_file"])            # (F,) float64, seconds
 

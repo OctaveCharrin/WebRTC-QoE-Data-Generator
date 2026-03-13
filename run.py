@@ -104,6 +104,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         config.repeats = args.repeats
     if args.duration is not None:
         config.test_duration_sec = args.duration
+    if args.vmaf_mode is not None:
+        config.vmaf_mode = args.vmaf_mode
     if args.debug_frames:
         config.debug_frames = True
 
@@ -124,8 +126,12 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"\nCompleted {len(results)} experiments.")
 
     if results:
-        vmaf_scores = [r["mean_vmaf"] for r in results]
-        print(f"VMAF range: {min(vmaf_scores):.1f} - {max(vmaf_scores):.1f}")
+        vmaf_scores = [r["mean_vmaf"] for r in results if r.get("mean_vmaf") is not None]
+        if vmaf_scores:
+            print(f"VMAF (cropped) range: {min(vmaf_scores):.1f} - {max(vmaf_scores):.1f}")
+        vmaf_masked_scores = [r["mean_vmaf_masked"] for r in results if r.get("mean_vmaf_masked") is not None]
+        if vmaf_masked_scores:
+            print(f"VMAF (masked) range: {min(vmaf_masked_scores):.1f} - {max(vmaf_masked_scores):.1f}")
 
 
 def cmd_build_dataset(args: argparse.Namespace) -> None:
@@ -179,12 +185,21 @@ def cmd_debug_alignment(args: argparse.Namespace) -> None:
     # Load per-frame VMAF scores if available
     per_frame_vmaf = None
     mean_vmaf = None
+    per_frame_vmaf_masked = None
+    mean_vmaf_masked = None
     if vmaf_json.exists():
         import json
         with open(vmaf_json) as f:
             vmaf_data = json.load(f)
         per_frame_vmaf = [frame["metrics"]["vmaf"] for frame in vmaf_data["frames"]]
         mean_vmaf = vmaf_data["pooled_metrics"]["vmaf"]["mean"]
+    masked_json = vmaf_json.with_name(vmaf_json.stem + "_masked.json")
+    if masked_json.exists():
+        import json
+        with open(masked_json) as f:
+            masked_data = json.load(f)
+        per_frame_vmaf_masked = [frame["metrics"]["vmaf"] for frame in masked_data["frames"]]
+        mean_vmaf_masked = masked_data["pooled_metrics"]["vmaf"]["mean"]
 
     # Re-run normalization and trimming (intermediates were deleted)
     print(f"Processing {experiment_id}...")
@@ -223,6 +238,9 @@ def cmd_debug_alignment(args: argparse.Namespace) -> None:
     ]
     subprocess.run(trim_cmd, check=True)
 
+    # Calculate mask region
+    mask_region = config.calculate_mask_region(height, width)
+
     # Generate comparison frames
     generate_frame_comparison(
         trimmed_video=trimmed_y4m,
@@ -230,9 +248,13 @@ def cmd_debug_alignment(args: argparse.Namespace) -> None:
         output_dir=output_dir,
         width=width,
         height=height,
+        frame_overlay_crop_height=config.frame_overlay_crop_height,
         per_frame_vmaf=per_frame_vmaf,
         mean_vmaf=mean_vmaf,
+        per_frame_vmaf_masked=per_frame_vmaf_masked,
+        mean_vmaf_masked=mean_vmaf_masked,
         step=args.step,
+        mask_region=mask_region,
     )
 
     # Clean up intermediates
@@ -331,6 +353,8 @@ Examples:
                      help="Re-run all experiments even if results exist")
     run.add_argument("--skip-vmaf", action="store_true",
                      help="Continue even if FFmpeg lacks libvmaf")
+    run.add_argument("--vmaf-mode", choices=["cropped", "masked", "both"],
+                     help="VMAF computation mode: cropped, masked, or both (default: both)")
     run.add_argument("--debug-frames", action="store_true",
                      help="Generate side-by-side frame comparison PNGs for alignment verification")
     run.set_defaults(func=cmd_run)

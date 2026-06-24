@@ -66,18 +66,18 @@ class Orchestrator:
         Default grid: 10 loss x 6 delay x 4 jitter x 1 bw x 3 repeats = 720.
         """
         grid = []
-        for loss, delay, jitter, bw in itertools.product(
+        for loss, delay, jitter, bitrate in itertools.product(
             self.config.loss_values,
             self.config.delay_values,
             self.config.jitter_values,
-            self.config.bandwidth_values,
+            self.config.bitrate_values,
         ):
             for repeat in range(self.config.repeats):
                 condition = NetworkCondition(
                     loss_percent=loss,
                     delay_ms=delay,
                     jitter_ms=jitter,
-                    bandwidth_kbps=bw,
+                    bitrate_kbps=bitrate,
                 )
                 grid.append((condition, repeat))
         return grid
@@ -132,7 +132,11 @@ class Orchestrator:
 
             self.receiver.navigate(f"{base_url}/?role=receiver&room={room}")
             time.sleep(2)  # Let receiver's WebSocket connect before sender joins
-            self.sender.navigate(f"{base_url}/?role=sender&room={room}")
+            # Pass the per-experiment encoder bitrate cap to the sender page.
+            self.sender.navigate(
+                f"{base_url}/?role=sender&room={room}"
+                f"&maxbitrate={condition.bitrate_kbps}"
+            )
             time.sleep(1)  # Let sender's page settle before polling
 
             # --- Step 3: Wait for WebRTC connection ---
@@ -251,7 +255,8 @@ class Orchestrator:
                 "loss_percent": condition.loss_percent,
                 "delay_ms": condition.delay_ms,
                 "jitter_ms": condition.jitter_ms,
-                "bandwidth_kbps": condition.bandwidth_kbps,
+                "bitrate_kbps": condition.bitrate_kbps,
+                "realized_bitrate_kbps": traffic_data["realized_bitrate_kbps"],
                 "repeat": repeat,
                 "mean_vmaf": vmaf_result["mean_vmaf"] if vmaf_result["mean_vmaf"] else None,
                 "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] if vmaf_result["mean_vmaf_masked"] else None,

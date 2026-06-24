@@ -35,6 +35,7 @@ def parse_pcap(pcap_path: Path) -> dict:
           - dst_ports:          np.array of int32
           - total_packets:      int
           - duration_sec:       float (time span of the capture)
+          - realized_bitrate_kbps: float (wire bitrate: 8*bytes/duration/1000)
     """
     # Import scapy here to avoid slow import at module level
     from scapy.all import rdpcap, UDP
@@ -64,6 +65,7 @@ def parse_pcap(pcap_path: Path) -> dict:
             "dst_ports": np.array([], dtype=np.int32),
             "total_packets": 0,
             "duration_sec": 0.0,
+            "realized_bitrate_kbps": 0.0,
         }
 
     timestamps = np.array(timestamps, dtype=np.float64)
@@ -80,9 +82,18 @@ def parse_pcap(pcap_path: Path) -> dict:
 
     duration = float(timestamps[-1] - timestamps[0]) if len(timestamps) > 1 else 0.0
 
+    # Realized (wire) bitrate of the captured UDP traffic. This is the actual
+    # bytes that produced the received video, used to verify the encoder cap
+    # took effect (configured bitrate_kbps vs realized).
+    total_bytes = int(sizes.sum())
+    realized_bitrate_kbps = (
+        8.0 * total_bytes / duration / 1000.0 if duration > 0 else 0.0
+    )
+
     logger.info(
         f"Parsed {len(timestamps)} UDP packets over {duration:.1f}s "
-        f"(avg size: {sizes.mean():.0f} bytes)"
+        f"(avg size: {sizes.mean():.0f} bytes, "
+        f"realized: {realized_bitrate_kbps:.0f} kbps)"
     )
 
     return {
@@ -93,6 +104,7 @@ def parse_pcap(pcap_path: Path) -> dict:
         "dst_ports": dst_ports,
         "total_packets": len(timestamps),
         "duration_sec": duration,
+        "realized_bitrate_kbps": realized_bitrate_kbps,
     }
 
 

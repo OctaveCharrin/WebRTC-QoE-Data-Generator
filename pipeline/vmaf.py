@@ -119,6 +119,78 @@ def _get_frame_count(video_path: Path) -> int:
     return int(result.stdout.strip())
 
 
+# ---------------------------------------------------------------------------
+# Fine temporal alignment (frame-offset search)
+# ---------------------------------------------------------------------------
+#
+# Padding detection trims most of the startup offset, but a residual temporal
+# shift remains: Chrome's fake video capture loops the Y4M and does NOT reliably
+# restart at frame 0 on replaceTrack, so the receiver's content often starts a
+# dozen-or-so frames ahead of the reference. Comparing temporally-shifted frames
+# tanks VMAF even when the image quality is perfect. We recover the integer frame
+# offset by matching small (8x8) grayscale frame fingerprints — computed on the
+# overlay-cropped region so the burned-in frame numbers don't bias the match.
+
+
+def _frame_signatures(
+    video_path: Path, width: int, height: int, crop_height: int,
+    max_frames: int = 240, size: int = 8,
+) -> np.ndarray | None:
+    """Extract a compact per-frame fingerprint (size*size gray) for the first
+    ``max_frames`` frames. Returns (n, size*size) float array, or None on error."""
+    crop = f"crop=iw:ih-{crop_height}:0:0," if crop_height > 0 else ""
+    cmd = [
+        "ffmpeg", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", f"{crop}scale={size}:{size},format=gray",
+        "-frames:v", str(max_frames),
+        "-f", "rawvideo", "-pix_fmt", "gray", "-",
+    ]
+    res = subprocess.run(cmd, capture_output=True)
+    if res.returncode != 0 or not res.stdout:
+        return None
+    arr = np.frombuffer(res.stdout, dtype=np.uint8).astype(np.float64)
+    n = arr.size // (size * size)
+    if n == 0:
+        return None
+    return arr[: n * size * size].reshape(n, size * size)
+
+
+def estimate_frame_offset(
+    distorted_sig: np.ndarray, reference_sig: np.ndarray,
+    max_offset: int = 72, min_overlap: int = 30,
+) -> int:
+    """Find integer offset ``d`` such that ``distorted[i]`` best matches
+    ``reference[i + d]`` (positive d means the distorted stream leads the
+    reference). Minimizes mean absolute fingerprint difference over the overlap.
+    """
+    best_d, best_cost = 0, np.inf
+    for d in range(-max_offset, max_offset + 1):
+        if d >= 0:
+            a, b = distorted_sig, reference_sig[d:]
+        else:
+            a, b = distorted_sig[-d:], reference_sig
+        L = min(len(a), len(b))
+        if L < min_overlap:
+            continue
+        cost = float(np.mean(np.abs(a[:L] - b[:L])))
+        if cost < best_cost:
+            best_cost, best_d = cost, d
+    return best_d
+
+
+def _trim_leading_frames(src: Path, dst: Path, n_frames: int) -> Path:
+    """Write ``src`` with its first ``n_frames`` frames dropped (re-based PTS)."""
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-y",
+        "-i", str(src),
+        "-vf", f"select=gte(n\\,{n_frames}),setpts=PTS-STARTPTS",
+        "-pix_fmt", "yuv420p",
+        str(dst),
+    ], check=True)
+    return dst
+
+
 def detect_padding_boundaries(
     video_path: Path, width: int, height: int, fps: int,
     padding_duration_sec: int = 5, threshold: int = 50,
@@ -397,6 +469,8 @@ def compute_vmaf(
     debug_frame_step: int = 10,
     vmaf_mode: str = "both",
     mask_region: tuple[int, int, int, int] | None = None,
+    align: bool = True,
+    align_max_offset: int = 72,
 ) -> dict:
     """
     Compute VMAF score with automatic padding removal and alignment.
@@ -405,7 +479,10 @@ def compute_vmaf(
       1. Convert received WebM to Y4M (normalize resolution/fps)
       2. Detect padding boundaries in the received video
       3. Trim the received video to content-only region
-      4. Compute VMAF comparing trimmed received vs reference (one or both modes)
+      3b. Fine temporal alignment: search the integer frame offset between the
+          trimmed received video and the reference and drop the leading frames
+          of whichever stream leads, so frames line up before VMAF.
+      4. Compute VMAF comparing aligned received vs reference (one or both modes)
 
     The reference video should already be content-only (no padding).
 
@@ -426,6 +503,9 @@ def compute_vmaf(
         vmaf_mode: "cropped" (crop overlay), "masked" (white box), or "both" (default).
         mask_region: (x, y, w, h) tuple for the overlay box. If None, falls back to
             cropping-based masking.
+        align: If True (default), correct residual temporal misalignment by
+            searching for the best integer frame offset before VMAF.
+        align_max_offset: Max frames to search in each direction for alignment.
 
     Returns:
         Dictionary with:
@@ -485,8 +565,42 @@ def compute_vmaf(
         logger.error(f"FFmpeg trim failed: {result.stderr}")
         raise RuntimeError(f"FFmpeg trim failed: {result.stderr}")
 
+    # --- Step 3b: Fine temporal alignment via frame-offset search ---
+    # Padding detection alone leaves a residual shift (Chrome's looping fake
+    # capture doesn't reset to frame 0), so match content fingerprints and drop
+    # the leading frames of whichever stream leads.
+    distorted_path = trimmed_y4m
+    reference_path = reference_video
+    aligned_ref_y4m = output_json.with_suffix(".ref_aligned.y4m")
+    aligned_dist_y4m = output_json.with_suffix(".dist_aligned.y4m")
+    frame_offset = 0
+    if align:
+        dist_sig = _frame_signatures(
+            trimmed_y4m, width, height, frame_overlay_crop_height)
+        ref_sig = _frame_signatures(
+            reference_video, width, height, frame_overlay_crop_height)
+        if dist_sig is not None and ref_sig is not None:
+            frame_offset = estimate_frame_offset(
+                dist_sig, ref_sig, max_offset=align_max_offset)
+            if frame_offset > 0:
+                # Received leads the reference: skip the reference's first frames.
+                logger.info(
+                    f"Aligning: received leads reference by {frame_offset} frames "
+                    f"(trimming reference)")
+                _trim_leading_frames(reference_video, aligned_ref_y4m, frame_offset)
+                reference_path = aligned_ref_y4m
+            elif frame_offset < 0:
+                # Reference leads the received: skip the received's first frames.
+                logger.info(
+                    f"Aligning: reference leads received by {-frame_offset} frames "
+                    f"(trimming received)")
+                _trim_leading_frames(trimmed_y4m, aligned_dist_y4m, -frame_offset)
+                distorted_path = aligned_dist_y4m
+            else:
+                logger.info("Aligning: no residual frame offset detected")
+
     # --- Step 4: Compute VMAF (one or both methods) ---
-    # The reference is content-only. The trimmed received is now also content-only.
+    # The reference is content-only. The aligned received is also content-only.
     # FFmpeg's libvmaf will compare frame-by-frame in order.
     # If the received video has fewer frames (due to drops), libvmaf compares
     # up to the shorter of the two.
@@ -500,8 +614,8 @@ def compute_vmaf(
         """Run a single VMAF computation and return (per_frame, mean)."""
         cmd = [
             "ffmpeg", "-loglevel", "error", "-y",
-            "-i", str(trimmed_y4m),
-            "-i", str(reference_video),
+            "-i", str(distorted_path),
+            "-i", str(reference_path),
             "-lavfi", lavfi,
             "-f", "null", "-",
         ]
@@ -578,8 +692,8 @@ def compute_vmaf(
     if debug_dir is not None:
         logger.info("Generating debug frame comparisons...")
         generate_frame_comparison(
-            trimmed_video=trimmed_y4m,
-            reference_video=reference_video,
+            trimmed_video=distorted_path,
+            reference_video=reference_path,
             output_dir=debug_dir,
             width=width,
             height=height,
@@ -595,10 +709,13 @@ def compute_vmaf(
     # Clean up intermediate files
     received_y4m.unlink(missing_ok=True)
     trimmed_y4m.unlink(missing_ok=True)
+    aligned_ref_y4m.unlink(missing_ok=True)
+    aligned_dist_y4m.unlink(missing_ok=True)
 
     logger.info(
         f"VMAF: cropped={mean_vmaf_cropped:.2f}, "
-        f"masked={mean_vmaf_masked:.2f}, frames={frame_count}"
+        f"masked={mean_vmaf_masked:.2f}, frames={frame_count}, "
+        f"frame_offset={frame_offset}"
     )
     return {
         "mean_vmaf": mean_vmaf_cropped,
@@ -609,4 +726,5 @@ def compute_vmaf(
         "frame_count": frame_count,
         "content_start_frame": first_content,
         "content_end_frame": last_content,
+        "frame_offset": frame_offset,
     }

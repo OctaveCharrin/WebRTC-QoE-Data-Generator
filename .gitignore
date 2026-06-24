@@ -8,3 +8,10 @@
 
 /output
 !/output/.gitkeep
+
+# Run logs
+*.log
+
+# Fitted reward model artifacts (regenerate with `run.py fit-reward`)
+reward/reward_model.npz
+reward/reward_model.pkl

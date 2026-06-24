@@ -70,16 +70,26 @@ fi
 # --- Step 2: Process content video -------------------------------------------
 # Scale to target resolution, set frame rate, overlay frame numbers.
 echo "[2/6] Processing content video: ${WIDTH}x${HEIGHT}@${FPS}fps, ${DURATION_SEC}s..."
+# The frame-number overlay needs the drawtext filter (libfreetype). It is only
+# a human-visible per-frame alignment aid — VMAF alignment itself is driven by
+# the testsrc padding detection, and the crop/mask region keeps the overlay out
+# of VMAF. If this ffmpeg build lacks drawtext, skip the overlay gracefully.
+VF="scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,\
+pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,\
+setsar=1:1"
+if ffmpeg -hide_banner -filters 2>/dev/null | grep -qw drawtext; then
+    VF="${VF},drawtext=text='%{frame_num}':start_number=1:\
+x=(w-tw)/2:y=h-(2*lh)+15:\
+fontcolor=black:fontsize=40:\
+box=1:boxcolor=white:boxborderw=10"
+else
+    echo "      WARNING: ffmpeg has no 'drawtext' filter — skipping frame-number"
+    echo "      overlay (alignment still uses testsrc padding; VMAF unaffected)."
+fi
 ffmpeg -loglevel warning -y \
     -i "$SOURCE_FILE" \
     -ss 00:00:00 -t "$DURATION_SEC" \
-    -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,\
-pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,\
-setsar=1:1,\
-drawtext=text='%{frame_num}':start_number=1:\
-x=(w-tw)/2:y=h-(2*lh)+15:\
-fontcolor=black:fontsize=40:\
-box=1:boxcolor=white:boxborderw=10" \
+    -vf "$VF" \
     -r "$FPS" \
     -pix_fmt yuv420p \
     "$OUTPUT_DIR/content.mp4"

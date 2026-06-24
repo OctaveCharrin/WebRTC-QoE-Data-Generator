@@ -25,18 +25,19 @@ def build_dataset(output_dir: Path, dataset_dir: Path) -> Path:
 
     Expected directory structure under output_dir:
         output/
-          L0_D0_J0_BW0_R0/
+          L0_D0_J0_B600_R0/
             result.json
-            L0_D0_J0_BW0_R0_packet_sizes.npy
-            L0_D0_J0_BW0_R0_inter_packet_times.npy
-          L5_D50_J0_BW0_R0/
+            L0_D0_J0_B600_R0_packet_sizes.npy
+            L0_D0_J0_B600_R0_inter_packet_times.npy
+          L5_D50_J0_B600_R0/
             result.json
             ...
 
     Output:
         dataset_dir/dataset.csv with columns:
-          experiment_id, loss_percent, delay_ms, jitter_ms, bandwidth_kbps,
-          repeat, mean_vmaf, mean_vmaf_masked, frame_count, packet_count,
+          experiment_id, loss_percent, delay_ms, jitter_ms, bitrate_kbps,
+          realized_bitrate_kbps, repeat, mean_vmaf, mean_vmaf_masked,
+          frame_count, packet_count,
           traffic_duration_sec, packet_sizes_file, inter_packet_times_file,
           packet_timestamps_file, per_frame_vmaf_file, per_frame_vmaf_masked_file,
           frame_times_file, recording_file, pcap_file
@@ -68,7 +69,8 @@ def build_dataset(output_dir: Path, dataset_dir: Path) -> Path:
     df = pd.DataFrame(records)
 
     # Sort by network condition for readability
-    sort_cols = [c for c in ["loss_percent", "delay_ms", "jitter_ms", "repeat"]
+    sort_cols = [c for c in ["bitrate_kbps", "loss_percent", "delay_ms",
+                             "jitter_ms", "repeat"]
                  if c in df.columns]
     if sort_cols:
         df = df.sort_values(sort_cols).reset_index(drop=True)
@@ -192,5 +194,16 @@ def dataset_summary(dataset_csv: Path) -> str:
             vmaf_masked_mean = group["mean_vmaf_masked"].mean()
             stats += f"  VMAF(mask)={vmaf_masked_mean:.1f}"
         lines.append(stats)
+
+    if "bitrate_kbps" in df:
+        lines.append("")
+        lines.append("Breakdown by encoder bitrate:")
+        for bitrate, group in df.groupby("bitrate_kbps"):
+            stats = f"  bitrate={bitrate:5.0f}kbps  n={len(group):3d}"
+            if "realized_bitrate_kbps" in df:
+                stats += f"  realized={group['realized_bitrate_kbps'].mean():6.0f}kbps"
+            if "mean_vmaf" in df:
+                stats += f"  VMAF(crop)={group['mean_vmaf'].mean():.1f}"
+            lines.append(stats)
 
     return "\n".join(lines)

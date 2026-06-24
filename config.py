@@ -89,8 +89,17 @@ class Config:
     jitter_values: List[int] = field(
         default_factory=lambda: [0, 25, 50, 100]
     )
-    bandwidth_values: List[int] = field(
-        default_factory=lambda: [0]  # 0 = unlimited
+    # Encoder target bitrate sweep (kbps). Each value is enforced two ways so
+    # the encoded bitrate actually equals the swept value: (1) the sender's
+    # WebRTC encoder is capped to it (setParameters maxBitrate + SDP b=AS in
+    # the signaling page), and (2) the sender container's egress is rate-limited
+    # to it via tc/tbf. This is the `bitrate_kbps` axis the QoS->VMAF reward
+    # surrogate is fitted over. 0 means "unlimited / no cap".
+    # Denser at the low end, where the rate->quality curve is steep: at
+    # 640x480 VP8 already looks good by ~300 kbps, so bitrate only discriminates
+    # below that. Add 100-250 kbps to capture the steep part of the curve.
+    bitrate_values: List[int] = field(
+        default_factory=lambda: [100, 150, 250, 400, 600, 1000, 1500, 2500]
     )
     repeats: int = 3
 

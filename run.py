@@ -98,8 +98,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         config.delay_values = args.delay
     if args.jitter is not None:
         config.jitter_values = args.jitter
-    if args.bandwidth is not None:
-        config.bandwidth_values = args.bandwidth
+    if args.bitrate is not None:
+        config.bitrate_values = args.bitrate
     if args.repeats is not None:
         config.repeats = args.repeats
     if args.duration is not None:
@@ -116,6 +116,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"  Loss:     {config.loss_values}")
     print(f"  Delay:    {config.delay_values}")
     print(f"  Jitter:   {config.jitter_values}")
+    print(f"  Bitrate:  {config.bitrate_values} kbps")
     print(f"  Repeats:  {config.repeats}")
     print(f"  Duration: {config.test_duration_sec}s per experiment")
     estimated_time = len(grid) * (config.test_duration_sec + 15)
@@ -155,6 +156,114 @@ def cmd_summary(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(dataset_summary(csv_path))
+
+
+def cmd_reprocess_vmaf(args: argparse.Namespace) -> None:
+    """Recompute VMAF for already-recorded experiments (no WebRTC re-capture).
+
+    Useful after a change to the VMAF/alignment logic: re-scores the saved
+    recordings and rewrites each result.json + per-frame .npy in place. Traffic
+    features (packets) are left untouched.
+    """
+    import json
+    import numpy as np
+    from pipeline.vmaf import compute_vmaf
+
+    config = Config()
+    reference_video = config.media_dir / "reference.y4m"
+    if not reference_video.exists():
+        print("ERROR: Reference video not found. Run 'generate-video' first.")
+        sys.exit(1)
+
+    mask_region = config.calculate_mask_region(config.video_height, config.video_width)
+    result_files = sorted(config.output_dir.glob("*/result.json"))
+    if args.experiment_id:
+        result_files = [f for f in result_files
+                        if f.parent.name == args.experiment_id]
+
+    updated = 0
+    for rf in result_files:
+        with open(rf) as f:
+            result = json.load(f)
+        eid = result["experiment_id"]
+        recording = config.recordings_dir / f"{eid}.webm"
+        if not recording.exists():
+            print(f"  SKIP {eid} (no recording)")
+            continue
+
+        exp_dir = config.output_dir / eid
+        vmaf_json = config.vmaf_dir / f"{eid}_vmaf.json"
+        debug_dir = exp_dir / "debug_frames" if args.debug_frames else None
+        old_vmaf = result.get("mean_vmaf")
+
+        vr = compute_vmaf(
+            received_video=recording,
+            reference_video=reference_video,
+            output_json=vmaf_json,
+            width=config.video_width,
+            height=config.video_height,
+            fps=config.video_fps,
+            frame_overlay_crop_height=config.frame_overlay_crop_height,
+            padding_duration_sec=config.padding_duration_sec,
+            padding_threshold=config.padding_color_threshold,
+            debug_dir=debug_dir,
+            debug_frame_step=config.debug_frame_step,
+            vmaf_mode=args.vmaf_mode or config.vmaf_mode,
+            mask_region=mask_region,
+        )
+
+        # Rewrite per-frame arrays + result fields (traffic features untouched).
+        if vr["per_frame_vmaf"]:
+            np.save(exp_dir / f"{eid}_per_frame_vmaf.npy",
+                    np.array(vr["per_frame_vmaf"], dtype=np.float64))
+        if vr["per_frame_vmaf_masked"]:
+            np.save(exp_dir / f"{eid}_per_frame_vmaf_masked.npy",
+                    np.array(vr["per_frame_vmaf_masked"], dtype=np.float64))
+        np.save(exp_dir / f"{eid}_frame_times.npy",
+                np.array(vr["frame_times"], dtype=np.float64))
+
+        result["mean_vmaf"] = vr["mean_vmaf"] or None
+        result["mean_vmaf_masked"] = vr["mean_vmaf_masked"] or None
+        result["frame_count"] = vr["frame_count"]
+        result["frame_offset"] = vr["frame_offset"]
+        with open(rf, "w") as f:
+            json.dump(result, f, indent=2)
+
+        old_str = f"{old_vmaf:.1f}" if old_vmaf is not None else "N/A"
+        print(f"  {eid}: VMAF {old_str} -> {vr['mean_vmaf']:.1f} "
+              f"(offset {vr['frame_offset']})")
+        updated += 1
+
+    print(f"\nReprocessed {updated} experiment(s). "
+          f"Run 'build-dataset' to refresh dataset.csv.")
+
+
+def cmd_fit_reward(args: argparse.Namespace) -> None:
+    """Fit the QoS->VMAF surrogate and report VMAF discrimination."""
+    from pipeline.surrogate import (
+        average_grid,
+        build_surrogate,
+        reward_surface_report,
+    )
+
+    config = Config()
+    csv_path = config.dataset_dir / "dataset.csv"
+    if not csv_path.exists():
+        print("No dataset found. Run 'python run.py build-dataset' first.")
+        sys.exit(1)
+
+    reward_dir = PROJECT_ROOT / "reward"
+    params = build_surrogate(
+        dataset_csv=csv_path,
+        output_dir=config.output_dir,
+        reward_dir=reward_dir,
+        vmaf_column=args.vmaf_column,
+    )
+
+    # Discrimination report on the same averaged grid the model was fit on.
+    X, y, _ = average_grid(csv_path, vmaf_column=args.vmaf_column)
+    print()
+    print(reward_surface_report(params, X, y, narrow_threshold=args.narrow_threshold))
 
 
 def cmd_debug_alignment(args: argparse.Namespace) -> None:
@@ -341,8 +450,8 @@ Examples:
                      help="Delay values in ms (e.g., 0 50 100)")
     run.add_argument("--jitter", nargs="*", type=int,
                      help="Jitter values in ms (e.g., 0 25 50)")
-    run.add_argument("--bandwidth", nargs="*", type=int,
-                     help="Bandwidth limits in kbps (0 = unlimited)")
+    run.add_argument("--bitrate", nargs="*", type=int,
+                     help="Encoder target bitrates in kbps to sweep (0 = uncapped)")
     run.add_argument("--repeats", type=int,
                      help="Number of repeats per condition (default: 3)")
     run.add_argument("--duration", type=int,
@@ -373,13 +482,38 @@ Examples:
     )
     sm.set_defaults(func=cmd_summary)
 
+    # --- reprocess-vmaf ---
+    rp = subparsers.add_parser(
+        "reprocess-vmaf",
+        help="Recompute VMAF for existing recordings (no WebRTC re-capture)",
+    )
+    rp.add_argument("experiment_id", nargs="?", default=None,
+                    help="Only reprocess this experiment (default: all)")
+    rp.add_argument("--vmaf-mode", choices=["cropped", "masked", "both"],
+                    help="VMAF computation mode (default: config default)")
+    rp.add_argument("--debug-frames", action="store_true",
+                    help="Also regenerate side-by-side alignment PNGs")
+    rp.set_defaults(func=cmd_reprocess_vmaf)
+
+    # --- fit-reward ---
+    fr = subparsers.add_parser(
+        "fit-reward",
+        help="Fit the QoS->VMAF surrogate and report VMAF discrimination",
+    )
+    fr.add_argument("--vmaf-column", default="mean_vmaf",
+                    help="VMAF column to fit (default: mean_vmaf; "
+                         "falls back to mean_vmaf_masked)")
+    fr.add_argument("--narrow-threshold", type=float, default=10.0,
+                    help="Warn if measured VMAF range is below this (default: 10)")
+    fr.set_defaults(func=cmd_fit_reward)
+
     # --- debug-alignment ---
     da = subparsers.add_parser(
         "debug-alignment",
         help="Generate side-by-side frame comparison PNGs for an experiment",
     )
     da.add_argument("experiment_id",
-                    help="Experiment ID (e.g., L0.0_D0_J0_BW0_R0)")
+                    help="Experiment ID (e.g., L0.0_D0_J0_B1000_R0)")
     da.add_argument("--step", type=int, default=10,
                     help="Extract every Nth frame (default: 10)")
     da.set_defaults(func=cmd_debug_alignment)

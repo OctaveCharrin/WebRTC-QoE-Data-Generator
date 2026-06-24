@@ -32,6 +32,9 @@
     const params = new URLSearchParams(window.location.search);
     const ROLE = params.get('role') || 'sender';
     const ROOM = params.get('room') || 'default';
+    // Encoder target bitrate cap in kbps (0 = uncapped). Set by the orchestrator
+    // per experiment so the encoded bitrate equals the swept value.
+    const MAX_BITRATE_KBPS = parseInt(params.get('maxbitrate') || '0', 10);
 
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
@@ -178,6 +181,53 @@
     }
 
     // =========================================================================
+    // Encoder bitrate cap (sender only)
+    //
+    // Pins the encoded video bitrate to MAX_BITRATE_KBPS so the swept value
+    // actually equals what is sent. Two complementary mechanisms:
+    //   1. RTCRtpSender.setParameters({ encodings: [{ maxBitrate }] })
+    //   2. SDP munging of the offer (b=AS / b=TIAS on the video m-line)
+    // The path-side tc/tbf rate limit (host) enforces the same ceiling.
+    // =========================================================================
+
+    function mungeSdpBitrate(sdp, kbps) {
+        if (!kbps) return sdp;
+        const out = [];
+        let inVideo = false;
+        for (const line of sdp.split('\r\n')) {
+            if (line.startsWith('m=')) inVideo = line.startsWith('m=video');
+            // Drop any pre-existing bandwidth lines in the video section so we
+            // don't end up with duplicates.
+            if (inVideo && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
+                continue;
+            }
+            out.push(line);
+            // Insert our bandwidth caps right after the video m-line's c= line.
+            if (inVideo && line.startsWith('c=')) {
+                out.push('b=AS:' + kbps);
+                out.push('b=TIAS:' + (kbps * 1000));
+            }
+        }
+        return out.join('\r\n');
+    }
+
+    async function applyEncoderBitrate() {
+        if (ROLE !== 'sender' || !pc || !MAX_BITRATE_KBPS) return;
+        for (const sender of pc.getSenders()) {
+            if (!sender.track || sender.track.kind !== 'video') continue;
+            const p = sender.getParameters();
+            if (!p.encodings || p.encodings.length === 0) p.encodings = [{}];
+            p.encodings[0].maxBitrate = MAX_BITRATE_KBPS * 1000;  // bps
+            try {
+                await sender.setParameters(p);
+                log('Set max video bitrate: ' + MAX_BITRATE_KBPS + ' kbps');
+            } catch (e) {
+                log('setParameters failed: ' + e.message);
+            }
+        }
+    }
+
+    // =========================================================================
     // Sender: Capture media and create offer
     // =========================================================================
 
@@ -210,11 +260,15 @@
             videoEl.srcObject = stream;
             log('Local media captured');
 
-            // Create and send offer
+            // Cap the encoder bitrate now that the video sender exists.
+            await applyEncoderBitrate();
+
+            // Create and send offer (with bandwidth caps munged into the SDP).
             const offer = await pc.createOffer();
+            offer.sdp = mungeSdpBitrate(offer.sdp, MAX_BITRATE_KBPS);
             await pc.setLocalDescription(offer);
             ws.send(JSON.stringify(pc.localDescription.toJSON()));
-            log('Sent offer');
+            log('Sent offer' + (MAX_BITRATE_KBPS ? ` (capped ${MAX_BITRATE_KBPS} kbps)` : ''));
 
         } catch (err) {
             log(`getUserMedia error: ${err.message}`);
@@ -275,6 +329,9 @@
                 log('Replaced ' + sender.track.kind + ' track');
             }
         }
+
+        // Re-apply the encoder bitrate cap to the replaced track.
+        await applyEncoderBitrate();
 
         // Update the local video preview
         videoEl.srcObject = newStream;

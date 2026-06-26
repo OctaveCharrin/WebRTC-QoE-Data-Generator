@@ -68,10 +68,13 @@ class Config:
     debug_frame_step: int = 10
 
     # Frames to skip at the start of per-frame VMAF when computing the
-    # steady-state mean.  The encoder takes ~3s to converge to the target
-    # bitrate; including ramp-up frames compresses the high-quality end of
-    # the reward surface.  72 = 3s × 24fps (matches video_fps default).
-    steady_state_trim_sec: float = 3.0
+    # steady-state mean.  The WebRTC encoder (VP8 + GCC rate control) takes
+    # ~10-12s to converge to the target bitrate from a cold start; including
+    # ramp-up frames compresses the good-quality end of the reward surface by
+    # ~10 VMAF points.  Bad conditions (high loss / low bitrate) have no
+    # ramp-up so trimming them just reduces sample size slightly.
+    # Pair with test_duration_sec >= 30 to retain >= 20s of steady-state signal.
+    steady_state_trim_sec: float = 10.0
 
     # --- Light-run mode ---
     # Skips tcpdump, traffic feature extraction, per-frame npy arrays, and

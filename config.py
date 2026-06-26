@@ -67,6 +67,18 @@ class Config:
     debug_frames: bool = False
     debug_frame_step: int = 10
 
+    # Frames to skip at the start of per-frame VMAF when computing the
+    # steady-state mean.  The encoder takes ~3s to converge to the target
+    # bitrate; including ramp-up frames compresses the high-quality end of
+    # the reward surface.  72 = 3s × 24fps (matches video_fps default).
+    steady_state_trim_sec: float = 3.0
+
+    # --- Light-run mode ---
+    # Skips tcpdump, traffic feature extraction, per-frame npy arrays, and
+    # deletes the WebM after VMAF.  Only mean_vmaf/mean_vmaf_masked are kept.
+    # Use when building the reward function only (no RL traffic features needed).
+    light_run: bool = False
+
     # --- Docker container names (must match docker-compose.yml) ---
     sender_container: str = "webrtc-sender"
     receiver_container: str = "webrtc-receiver"

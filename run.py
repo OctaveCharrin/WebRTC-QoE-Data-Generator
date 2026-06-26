@@ -106,8 +106,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         config.test_duration_sec = args.duration
     if args.vmaf_mode is not None:
         config.vmaf_mode = args.vmaf_mode
+    elif args.light_run:
+        # Only compute the masked VMAF — the one fit-reward uses.
+        # Skips the second (cropped) VMAF pass, saving ~40% of post-processing time.
+        config.vmaf_mode = "masked"
     if args.debug_frames:
         config.debug_frames = True
+    if args.light_run:
+        config.light_run = True
 
     orchestrator = Orchestrator(config)
 
@@ -210,6 +216,7 @@ def cmd_reprocess_vmaf(args: argparse.Namespace) -> None:
             debug_frame_step=config.debug_frame_step,
             vmaf_mode=args.vmaf_mode or config.vmaf_mode,
             mask_region=mask_region,
+            steady_state_trim_sec=config.steady_state_trim_sec,
         )
 
         # Rewrite per-frame arrays + result fields (traffic features untouched).
@@ -223,7 +230,9 @@ def cmd_reprocess_vmaf(args: argparse.Namespace) -> None:
                 np.array(vr["frame_times"], dtype=np.float64))
 
         result["mean_vmaf"] = vr["mean_vmaf"] or None
+        result["mean_vmaf_steady"] = vr["mean_vmaf_steady"] or None
         result["mean_vmaf_masked"] = vr["mean_vmaf_masked"] or None
+        result["mean_vmaf_masked_steady"] = vr["mean_vmaf_masked_steady"] or None
         result["frame_count"] = vr["frame_count"]
         result["frame_offset"] = vr["frame_offset"]
         with open(rf, "w") as f:
@@ -466,6 +475,9 @@ Examples:
                      help="VMAF computation mode: cropped, masked, or both (default: both)")
     run.add_argument("--debug-frames", action="store_true",
                      help="Generate side-by-side frame comparison PNGs for alignment verification")
+    run.add_argument("--light-run", action="store_true",
+                     help="Skip traffic capture and per-frame arrays; keep only mean VMAF scores. "
+                          "Faster and produces much less output — use when building the reward function only.")
     run.set_defaults(func=cmd_run)
 
     # --- build-dataset ---
@@ -500,9 +512,9 @@ Examples:
         "fit-reward",
         help="Fit the QoS->VMAF surrogate and report VMAF discrimination",
     )
-    fr.add_argument("--vmaf-column", default="mean_vmaf",
-                    help="VMAF column to fit (default: mean_vmaf; "
-                         "falls back to mean_vmaf_masked)")
+    fr.add_argument("--vmaf-column", default="mean_vmaf_masked_steady",
+                    help="VMAF column to fit (default: mean_vmaf_masked_steady; "
+                         "falls back through mean_vmaf_steady → mean_vmaf_masked → mean_vmaf)")
     fr.add_argument("--narrow-threshold", type=float, default=10.0,
                     help="Warn if measured VMAF range is below this (default: 10)")
     fr.set_defaults(func=cmd_fit_reward)

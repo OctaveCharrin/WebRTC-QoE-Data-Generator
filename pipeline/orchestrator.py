@@ -123,6 +123,8 @@ class Orchestrator:
         logger.info(f"Condition:  {condition}")
         logger.info(f"{'=' * 60}")
 
+        light = self.config.light_run
+
         try:
             # --- Steps 1-2: Navigate browsers to the WebRTC page ---
             # Use a unique room per experiment so stale signaling state
@@ -161,8 +163,9 @@ class Orchestrator:
             self.sender.reset_media_tracks()
             time.sleep(1)  # Let new track propagate to receiver
 
-            # --- Step 5: Start tcpdump ---
-            self.network.start_tcpdump(pcap_container_path)
+            # --- Step 5: Start tcpdump (skipped in light-run) ---
+            if not light:
+                self.network.start_tcpdump(pcap_container_path)
 
             # --- Step 6: Start MediaRecorder on receiver ---
             self.receiver.start_recording()
@@ -194,23 +197,22 @@ class Orchestrator:
             time.sleep(1)  # Let recording finalize
             self.receiver.save_recording(recording_path)
 
-            # --- Step 13: Stop tcpdump and copy pcap ---
-            self.network.stop_tcpdump()
-            time.sleep(0.5)
-            self.network.copy_pcap(pcap_container_path, pcap_local)
+            # --- Step 13: Stop tcpdump and copy pcap (skipped in light-run) ---
+            if not light:
+                self.network.stop_tcpdump()
+                time.sleep(0.5)
+                self.network.copy_pcap(pcap_container_path, pcap_local)
 
-            # --- Step 11: Refresh browsers for next experiment ---
+            # --- Refresh browsers for next experiment ---
             self.sender.refresh()
             self.receiver.refresh()
             time.sleep(1)
 
-            # --- Step 12: Post-process ---
+            # --- Post-process ---
 
-            # 12a: Compute VMAF
+            # Compute VMAF
             reference_video = self.config.media_dir / "reference.y4m"
             debug_dir = exp_dir / "debug_frames" if self.config.debug_frames else None
-
-            # Calculate mask region for the overlay box
             mask_region = self.config.calculate_mask_region(
                 self.config.video_height, self.config.video_width
             )
@@ -229,62 +231,87 @@ class Orchestrator:
                 debug_frame_step=self.config.debug_frame_step,
                 vmaf_mode=self.config.vmaf_mode,
                 mask_region=mask_region,
+                steady_state_trim_sec=self.config.steady_state_trim_sec,
             )
 
-            # 12b: Parse pcap and extract traffic features
-            traffic_data = parse_pcap(pcap_local)
-            traffic_paths = save_traffic_features(
-                traffic_data, exp_dir, experiment_id
-            )
+            if light:
+                # Drop everything except the mean scores: WebM, VMAF JSON files.
+                recording_path.unlink(missing_ok=True)
+                vmaf_json.unlink(missing_ok=True)
+                vmaf_json.with_name(vmaf_json.stem + "_masked.json").unlink(missing_ok=True)
 
-            # 12c: Save per-frame VMAF scores and frame timestamps as .npy
-            per_frame_vmaf_path = exp_dir / f"{experiment_id}_per_frame_vmaf.npy"
-            per_frame_vmaf_masked_path = exp_dir / f"{experiment_id}_per_frame_vmaf_masked.npy"
-            frame_times_path = exp_dir / f"{experiment_id}_frame_times.npy"
+                result = {
+                    "experiment_id": experiment_id,
+                    "loss_percent": condition.loss_percent,
+                    "delay_ms": condition.delay_ms,
+                    "jitter_ms": condition.jitter_ms,
+                    "bitrate_kbps": condition.bitrate_kbps,
+                    "repeat": repeat,
+                    "mean_vmaf": vmaf_result["mean_vmaf"] or None,
+                    "mean_vmaf_steady": vmaf_result["mean_vmaf_steady"] or None,
+                    "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] or None,
+                    "mean_vmaf_masked_steady": vmaf_result["mean_vmaf_masked_steady"] or None,
+                    "frame_count": vmaf_result["frame_count"],
+                }
+            else:
+                # Full run: save traffic features and per-frame arrays.
+                traffic_data = parse_pcap(pcap_local)
+                traffic_paths = save_traffic_features(
+                    traffic_data, exp_dir, experiment_id
+                )
 
-            # Save per-frame VMAF only if computed
-            if vmaf_result["per_frame_vmaf"]:
-                np.save(per_frame_vmaf_path, np.array(vmaf_result["per_frame_vmaf"], dtype=np.float64))
-            if vmaf_result["per_frame_vmaf_masked"]:
-                np.save(per_frame_vmaf_masked_path, np.array(vmaf_result["per_frame_vmaf_masked"], dtype=np.float64))
-            np.save(frame_times_path, np.array(vmaf_result["frame_times"], dtype=np.float64))
+                per_frame_vmaf_path = exp_dir / f"{experiment_id}_per_frame_vmaf.npy"
+                per_frame_vmaf_masked_path = exp_dir / f"{experiment_id}_per_frame_vmaf_masked.npy"
+                frame_times_path = exp_dir / f"{experiment_id}_frame_times.npy"
 
-            # --- Step 13: Save experiment result ---
-            result = {
-                "experiment_id": experiment_id,
-                "loss_percent": condition.loss_percent,
-                "delay_ms": condition.delay_ms,
-                "jitter_ms": condition.jitter_ms,
-                "bitrate_kbps": condition.bitrate_kbps,
-                "realized_bitrate_kbps": traffic_data["realized_bitrate_kbps"],
-                "repeat": repeat,
-                "mean_vmaf": vmaf_result["mean_vmaf"] if vmaf_result["mean_vmaf"] else None,
-                "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] if vmaf_result["mean_vmaf_masked"] else None,
-                "frame_count": vmaf_result["frame_count"],
-                "packet_count": traffic_data["total_packets"],
-                "traffic_duration_sec": traffic_data["duration_sec"],
-                "packet_sizes_file": str(traffic_paths["packet_sizes"]),
-                "inter_packet_times_file": str(traffic_paths["inter_packet_times"]),
-                "packet_timestamps_file": str(traffic_paths["packet_timestamps"]),
-                "per_frame_vmaf_file": str(per_frame_vmaf_path) if vmaf_result["per_frame_vmaf"] else None,
-                "per_frame_vmaf_masked_file": str(per_frame_vmaf_masked_path) if vmaf_result["per_frame_vmaf_masked"] else None,
-                "frame_times_file": str(frame_times_path),
-                "recording_file": str(recording_path),
-                "pcap_file": str(pcap_local),
-            }
+                if vmaf_result["per_frame_vmaf"]:
+                    np.save(per_frame_vmaf_path, np.array(vmaf_result["per_frame_vmaf"], dtype=np.float64))
+                if vmaf_result["per_frame_vmaf_masked"]:
+                    np.save(per_frame_vmaf_masked_path, np.array(vmaf_result["per_frame_vmaf_masked"], dtype=np.float64))
+                np.save(frame_times_path, np.array(vmaf_result["frame_times"], dtype=np.float64))
+
+                result = {
+                    "experiment_id": experiment_id,
+                    "loss_percent": condition.loss_percent,
+                    "delay_ms": condition.delay_ms,
+                    "jitter_ms": condition.jitter_ms,
+                    "bitrate_kbps": condition.bitrate_kbps,
+                    "realized_bitrate_kbps": traffic_data["realized_bitrate_kbps"],
+                    "repeat": repeat,
+                    "mean_vmaf": vmaf_result["mean_vmaf"] or None,
+                    "mean_vmaf_steady": vmaf_result["mean_vmaf_steady"] or None,
+                    "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] or None,
+                    "mean_vmaf_masked_steady": vmaf_result["mean_vmaf_masked_steady"] or None,
+                    "frame_count": vmaf_result["frame_count"],
+                    "packet_count": traffic_data["total_packets"],
+                    "traffic_duration_sec": traffic_data["duration_sec"],
+                    "packet_sizes_file": str(traffic_paths["packet_sizes"]),
+                    "inter_packet_times_file": str(traffic_paths["inter_packet_times"]),
+                    "packet_timestamps_file": str(traffic_paths["packet_timestamps"]),
+                    "per_frame_vmaf_file": str(per_frame_vmaf_path) if vmaf_result["per_frame_vmaf"] else None,
+                    "per_frame_vmaf_masked_file": str(per_frame_vmaf_masked_path) if vmaf_result["per_frame_vmaf_masked"] else None,
+                    "frame_times_file": str(frame_times_path),
+                    "recording_file": str(recording_path),
+                    "pcap_file": str(pcap_local),
+                }
 
             with open(exp_dir / "result.json", "w") as f:
                 json.dump(result, f, indent=2)
 
-            vmaf_c_str = f"{vmaf_result['mean_vmaf']:.2f}" if vmaf_result['mean_vmaf'] is not None else "N/A"
-            vmaf_m_str = f"{vmaf_result['mean_vmaf_masked']:.2f}" if vmaf_result['mean_vmaf_masked'] is not None else "N/A"
-
-            logger.info(
-                f"Result: VMAF(cropped)={vmaf_c_str}, "
-                f"VMAF(masked)={vmaf_m_str}, "
-                f"packets={traffic_data['total_packets']}, "
-                f"frames={vmaf_result['frame_count']}"
-            )
+            vmaf_c_str = f"{vmaf_result['mean_vmaf']:.2f}" if vmaf_result['mean_vmaf'] else "N/A"
+            vmaf_m_str = f"{vmaf_result['mean_vmaf_masked']:.2f}" if vmaf_result['mean_vmaf_masked'] else "N/A"
+            if light:
+                logger.info(
+                    f"Result: VMAF(cropped)={vmaf_c_str}, "
+                    f"VMAF(masked)={vmaf_m_str}, frames={vmaf_result['frame_count']}"
+                )
+            else:
+                logger.info(
+                    f"Result: VMAF(cropped)={vmaf_c_str}, "
+                    f"VMAF(masked)={vmaf_m_str}, "
+                    f"packets={traffic_data['total_packets']}, "
+                    f"frames={vmaf_result['frame_count']}"
+                )
             return result
 
         except Exception as e:
@@ -294,10 +321,11 @@ class Orchestrator:
                 self.network.reset_netem()
             except Exception:
                 pass
-            try:
-                self.network.stop_tcpdump()
-            except Exception:
-                pass
+            if not light:
+                try:
+                    self.network.stop_tcpdump()
+                except Exception:
+                    pass
             raise
 
     # ---- Full experiment sweep ---------------------------------------------

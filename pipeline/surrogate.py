@@ -166,11 +166,22 @@ def fit_grid(X: np.ndarray, y: np.ndarray) -> dict:
 # Grid averaging + serialization
 # ---------------------------------------------------------------------------
 
-def average_grid(dataset_csv: Path, vmaf_column: str = "mean_vmaf"):
+# Preference order for VMAF column selection: steady-state masked is the most
+# accurate (removes ramp-up bias; uses more pixels than cropped).
+_VMAF_COLUMN_FALLBACKS = [
+    "mean_vmaf_masked_steady",
+    "mean_vmaf_steady",
+    "mean_vmaf_masked",
+    "mean_vmaf",
+]
+
+
+def average_grid(dataset_csv: Path, vmaf_column: str = "mean_vmaf_masked_steady"):
     """
     Load dataset.csv and average the VMAF target across repeats per condition.
 
-    Falls back to ``mean_vmaf_masked`` if the requested column is missing/empty.
+    Falls back through ``_VMAF_COLUMN_FALLBACKS`` if the requested column is
+    missing or entirely null (e.g. dataset built from a pre-steady-state run).
 
     Returns:
         (X, y, counts) where X is (n, 4) in FEATURE_COLUMNS order, y is (n,)
@@ -181,12 +192,18 @@ def average_grid(dataset_csv: Path, vmaf_column: str = "mean_vmaf"):
         raise ValueError(f"Dataset is empty: {dataset_csv}")
 
     if vmaf_column not in df.columns or df[vmaf_column].notna().sum() == 0:
-        fallback = "mean_vmaf_masked"
-        if fallback in df.columns and df[fallback].notna().sum() > 0:
-            logger.warning(f"'{vmaf_column}' unavailable; using '{fallback}'")
-            vmaf_column = fallback
-        else:
-            raise ValueError(f"No usable VMAF column ('{vmaf_column}'/'{fallback}')")
+        candidates = [c for c in _VMAF_COLUMN_FALLBACKS
+                      if c != vmaf_column
+                      and c in df.columns
+                      and df[c].notna().sum() > 0]
+        if not candidates:
+            raise ValueError(
+                f"No usable VMAF column found. Tried '{vmaf_column}' and "
+                f"fallbacks {_VMAF_COLUMN_FALLBACKS}."
+            )
+        fallback = candidates[0]
+        logger.warning(f"'{vmaf_column}' unavailable; using '{fallback}'")
+        vmaf_column = fallback
 
     missing = [c for c in _DATASET_COLUMNS.values() if c not in df.columns]
     if missing:
@@ -233,7 +250,7 @@ def build_surrogate(
     dataset_csv: Path,
     output_dir: Path,
     reward_dir: Path,
-    vmaf_column: str = "mean_vmaf",
+    vmaf_column: str = "mean_vmaf_masked_steady",
 ) -> dict:
     """
     Fit the surrogate from dataset.csv and write all artifacts.

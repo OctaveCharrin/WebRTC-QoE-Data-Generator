@@ -64,7 +64,7 @@ def _extract_frame_rgb(video_path: Path, frame_number: int,
     Returns ndarray of shape (height, width, 3) or None on failure.
     """
     cmd = [
-        "ffmpeg", "-loglevel", "error",
+        "ffmpeg", "-nostdin", "-loglevel", "error",
         "-i", str(video_path),
         "-vf", f"select=eq(n\\,{frame_number})",
         "-vframes", "1",
@@ -108,7 +108,7 @@ def _is_padding_frame(frame_rgb: np.ndarray, width: int, height: int,
 def _get_frame_count(video_path: Path) -> int:
     """Get the total number of frames in a video using ffprobe."""
     cmd = [
-        "ffprobe", "-v", "error",
+        "ffprobe", "-hide_banner", "-v", "error",
         "-select_streams", "v:0",
         "-count_frames",
         "-show_entries", "stream=nb_read_frames",
@@ -140,7 +140,7 @@ def _frame_signatures(
     ``max_frames`` frames. Returns (n, size*size) float array, or None on error."""
     crop = f"crop=iw:ih-{crop_height}:0:0," if crop_height > 0 else ""
     cmd = [
-        "ffmpeg", "-loglevel", "error",
+        "ffmpeg", "-nostdin", "-loglevel", "error",
         "-i", str(video_path),
         "-vf", f"{crop}scale={size}:{size},format=gray",
         "-frames:v", str(max_frames),
@@ -182,12 +182,12 @@ def estimate_frame_offset(
 def _trim_leading_frames(src: Path, dst: Path, n_frames: int) -> Path:
     """Write ``src`` with its first ``n_frames`` frames dropped (re-based PTS)."""
     subprocess.run([
-        "ffmpeg", "-loglevel", "error", "-y",
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-i", str(src),
         "-vf", f"select=gte(n\\,{n_frames}),setpts=PTS-STARTPTS",
         "-pix_fmt", "yuv420p",
         str(dst),
-    ], check=True)
+    ], capture_output=True, check=True)
     return dst
 
 
@@ -279,14 +279,14 @@ def _save_rgb_as_png(rgb_array: np.ndarray, output_path: Path,
                      width: int, height: int) -> None:
     """Save a raw RGB numpy array as a PNG file using FFmpeg."""
     cmd = [
-        "ffmpeg", "-loglevel", "error", "-y",
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}",
         "-i", "-",
         "-f", "image2",
         str(output_path),
     ]
-    subprocess.run(cmd, input=rgb_array.tobytes(), check=True)
+    subprocess.run(cmd, input=rgb_array.tobytes(), capture_output=True, check=True)
 
 
 def generate_frame_comparison(
@@ -432,7 +432,7 @@ def generate_frame_comparison(
 
         annotated_path = output_dir / f"frame_{frame_idx:04d}_tmp.png"
         text_cmd = [
-            "ffmpeg", "-loglevel", "error", "-y",
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
             "-i", str(png_path),
             "-vf", drawtext_filters,
             str(annotated_path),
@@ -471,6 +471,7 @@ def compute_vmaf(
     mask_region: tuple[int, int, int, int] | None = None,
     align: bool = True,
     align_max_offset: int = 72,
+    steady_state_trim_sec: float = 3.0,
 ) -> dict:
     """
     Compute VMAF score with automatic padding removal and alignment.
@@ -509,10 +510,12 @@ def compute_vmaf(
 
     Returns:
         Dictionary with:
-          - mean_vmaf:              float — cropped VMAF mean (0-100), or 0.0 if not computed
-          - per_frame_vmaf:         list[float] — cropped VMAF per frame (empty list if not computed)
-          - mean_vmaf_masked:       float — masked VMAF mean (0-100), or 0.0 if not computed
-          - per_frame_vmaf_masked:  list[float] — masked VMAF per frame (empty list if not computed)
+          - mean_vmaf:              float — cropped VMAF mean over all frames (0-100)
+          - mean_vmaf_steady:       float — cropped VMAF mean excluding first steady_state_trim_sec
+          - per_frame_vmaf:         list[float] — cropped VMAF per frame (empty if not computed)
+          - mean_vmaf_masked:       float — masked VMAF mean over all frames (0-100)
+          - mean_vmaf_masked_steady: float — masked VMAF mean excluding ramp-up frames
+          - per_frame_vmaf_masked:  list[float] — masked VMAF per frame (empty if not computed)
           - frame_times:            list[float] — time in seconds (i / fps)
           - frame_count:            int
           - content_start_frame:    int
@@ -525,7 +528,7 @@ def compute_vmaf(
 
     logger.info(f"Converting received video to {width}x{height}@{fps}fps...")
     convert_cmd = [
-        "ffmpeg", "-loglevel", "error", "-y",
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-i", str(received_video),
         "-vf", f"scale={width}:{height},fps={fps}",
         "-pix_fmt", "yuv420p",
@@ -553,7 +556,7 @@ def compute_vmaf(
         f"duration={content_duration:.2f}s"
     )
     trim_cmd = [
-        "ffmpeg", "-loglevel", "error", "-y",
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-i", str(received_y4m),
         "-ss", f"{start_time:.4f}",
         "-t", f"{content_duration:.4f}",
@@ -613,7 +616,7 @@ def compute_vmaf(
     def _run_vmaf(lavfi: str, json_path: Path, label: str) -> tuple[list[float], float]:
         """Run a single VMAF computation and return (per_frame, mean)."""
         cmd = [
-            "ffmpeg", "-loglevel", "error", "-y",
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
             "-i", str(distorted_path),
             "-i", str(reference_path),
             "-lavfi", lavfi,
@@ -684,9 +687,20 @@ def compute_vmaf(
     else:
         masked_json = None
 
-    # --- Step 5: Derive frame times ---
+    # --- Step 5: Derive frame times and steady-state means ---
     frame_count = len(per_frame_cropped) if per_frame_cropped else len(per_frame_masked)
     frame_times = [i / fps for i in range(frame_count)]
+
+    trim_frames = int(steady_state_trim_sec * fps)
+
+    def _steady_mean(frames: list[float]) -> float:
+        if not frames:
+            return 0.0
+        steady = frames[trim_frames:] if len(frames) > trim_frames else frames
+        return float(np.mean(steady))
+
+    mean_vmaf_steady = _steady_mean(per_frame_cropped)
+    mean_vmaf_masked_steady = _steady_mean(per_frame_masked)
 
     # --- Optional: generate debug frame comparison ---
     if debug_dir is not None:
@@ -713,14 +727,16 @@ def compute_vmaf(
     aligned_dist_y4m.unlink(missing_ok=True)
 
     logger.info(
-        f"VMAF: cropped={mean_vmaf_cropped:.2f}, "
-        f"masked={mean_vmaf_masked:.2f}, frames={frame_count}, "
-        f"frame_offset={frame_offset}"
+        f"VMAF: cropped={mean_vmaf_cropped:.2f} (steady={mean_vmaf_steady:.2f}), "
+        f"masked={mean_vmaf_masked:.2f} (steady={mean_vmaf_masked_steady:.2f}), "
+        f"frames={frame_count}, frame_offset={frame_offset}"
     )
     return {
         "mean_vmaf": mean_vmaf_cropped,
+        "mean_vmaf_steady": mean_vmaf_steady,
         "per_frame_vmaf": per_frame_cropped,
         "mean_vmaf_masked": mean_vmaf_masked,
+        "mean_vmaf_masked_steady": mean_vmaf_masked_steady,
         "per_frame_vmaf_masked": per_frame_masked,
         "frame_times": frame_times,
         "frame_count": frame_count,

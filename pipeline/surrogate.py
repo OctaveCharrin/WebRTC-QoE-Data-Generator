@@ -176,7 +176,7 @@ _VMAF_COLUMN_FALLBACKS = [
 ]
 
 
-def average_grid(dataset_csv: Path, vmaf_column: str = "mean_vmaf_masked_steady"):
+def average_grid(dataset_csv: Path, vmaf_column: str = "mean_vmaf_masked"):
     """
     Load dataset.csv and average the VMAF target across repeats per condition.
 
@@ -250,7 +250,7 @@ def build_surrogate(
     dataset_csv: Path,
     output_dir: Path,
     reward_dir: Path,
-    vmaf_column: str = "mean_vmaf_masked_steady",
+    vmaf_column: str = "mean_vmaf_masked",
 ) -> dict:
     """
     Fit the surrogate from dataset.csv and write all artifacts.

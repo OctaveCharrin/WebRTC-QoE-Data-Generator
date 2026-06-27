@@ -472,6 +472,7 @@ def compute_vmaf(
     align: bool = True,
     align_max_offset: int = 72,
     steady_state_trim_sec: float = 3.0,
+    compute_steady: bool = True,
 ) -> dict:
     """
     Compute VMAF score with automatic padding removal and alignment.
@@ -691,16 +692,20 @@ def compute_vmaf(
     frame_count = len(per_frame_cropped) if per_frame_cropped else len(per_frame_masked)
     frame_times = [i / fps for i in range(frame_count)]
 
-    trim_frames = int(steady_state_trim_sec * fps)
+    if compute_steady:
+        trim_frames = int(steady_state_trim_sec * fps)
 
-    def _steady_mean(frames: list[float]) -> float:
-        if not frames:
-            return 0.0
-        steady = frames[trim_frames:] if len(frames) > trim_frames else frames
-        return float(np.mean(steady))
+        def _steady_mean(frames: list[float]) -> float:
+            if not frames:
+                return 0.0
+            steady = frames[trim_frames:] if len(frames) > trim_frames else frames
+            return float(np.mean(steady))
 
-    mean_vmaf_steady = _steady_mean(per_frame_cropped)
-    mean_vmaf_masked_steady = _steady_mean(per_frame_masked)
+        mean_vmaf_steady = _steady_mean(per_frame_cropped)
+        mean_vmaf_masked_steady = _steady_mean(per_frame_masked)
+    else:
+        mean_vmaf_steady = 0.0
+        mean_vmaf_masked_steady = 0.0
 
     # --- Optional: generate debug frame comparison ---
     if debug_dir is not None:
@@ -726,11 +731,17 @@ def compute_vmaf(
     aligned_ref_y4m.unlink(missing_ok=True)
     aligned_dist_y4m.unlink(missing_ok=True)
 
-    logger.info(
-        f"VMAF: cropped={mean_vmaf_cropped:.2f} (steady={mean_vmaf_steady:.2f}), "
-        f"masked={mean_vmaf_masked:.2f} (steady={mean_vmaf_masked_steady:.2f}), "
-        f"frames={frame_count}, frame_offset={frame_offset}"
-    )
+    if compute_steady:
+        logger.info(
+            f"VMAF: cropped={mean_vmaf_cropped:.2f} (steady={mean_vmaf_steady:.2f}), "
+            f"masked={mean_vmaf_masked:.2f} (steady={mean_vmaf_masked_steady:.2f}), "
+            f"frames={frame_count}, frame_offset={frame_offset}"
+        )
+    else:
+        logger.info(
+            f"VMAF: cropped={mean_vmaf_cropped:.2f}, masked={mean_vmaf_masked:.2f}, "
+            f"frames={frame_count}, frame_offset={frame_offset}"
+        )
     return {
         "mean_vmaf": mean_vmaf_cropped,
         "mean_vmaf_steady": mean_vmaf_steady,

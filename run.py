@@ -114,6 +114,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         config.debug_frames = True
     if args.light_run:
         config.light_run = True
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
 
     orchestrator = Orchestrator(config)
 
@@ -146,6 +148,8 @@ def cmd_build_dataset(args: argparse.Namespace) -> None:
     from pipeline.dataset import build_dataset
 
     config = Config()
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
     csv_path = build_dataset(config.output_dir, config.dataset_dir)
     print(f"Dataset written to: {csv_path}")
 
@@ -155,6 +159,8 @@ def cmd_summary(args: argparse.Namespace) -> None:
     from pipeline.dataset import dataset_summary
 
     config = Config()
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
     csv_path = config.dataset_dir / "dataset.csv"
 
     if not csv_path.exists():
@@ -176,6 +182,8 @@ def cmd_reprocess_vmaf(args: argparse.Namespace) -> None:
     from pipeline.vmaf import compute_vmaf
 
     config = Config()
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
     reference_video = config.media_dir / "reference.y4m"
     if not reference_video.exists():
         print("ERROR: Reference video not found. Run 'generate-video' first.")
@@ -256,6 +264,8 @@ def cmd_fit_reward(args: argparse.Namespace) -> None:
     )
 
     config = Config()
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
     csv_path = config.dataset_dir / "dataset.csv"
     if not csv_path.exists():
         print("No dataset found. Run 'python run.py build-dataset' first.")
@@ -281,6 +291,8 @@ def cmd_debug_alignment(args: argparse.Namespace) -> None:
     from pipeline.vmaf import detect_padding_boundaries, _get_frame_count
 
     config = Config()
+    if args.output_dir is not None:
+        config.output_dir_override = Path(args.output_dir)
     experiment_id = args.experiment_id
 
     # Find the recording
@@ -478,6 +490,8 @@ Examples:
     run.add_argument("--light-run", action="store_true",
                      help="Skip traffic capture and per-frame arrays; keep only mean VMAF scores. "
                           "Faster and produces much less output — use when building the reward function only.")
+    run.add_argument("--output-dir", type=str, default=None,
+                     help="Override the output directory (default: ./output)")
     run.set_defaults(func=cmd_run)
 
     # --- build-dataset ---
@@ -485,6 +499,8 @@ Examples:
         "build-dataset",
         help="Assemble training dataset from experiment results",
     )
+    ds.add_argument("--output-dir", type=str, default=None,
+                    help="Override the output directory (default: ./output)")
     ds.set_defaults(func=cmd_build_dataset)
 
     # --- summary ---
@@ -492,6 +508,8 @@ Examples:
         "summary",
         help="Show dataset summary statistics",
     )
+    sm.add_argument("--output-dir", type=str, default=None,
+                    help="Override the output directory (default: ./output)")
     sm.set_defaults(func=cmd_summary)
 
     # --- reprocess-vmaf ---
@@ -505,6 +523,8 @@ Examples:
                     help="VMAF computation mode (default: config default)")
     rp.add_argument("--debug-frames", action="store_true",
                     help="Also regenerate side-by-side alignment PNGs")
+    rp.add_argument("--output-dir", type=str, default=None,
+                    help="Override the output directory (default: ./output)")
     rp.set_defaults(func=cmd_reprocess_vmaf)
 
     # --- fit-reward ---
@@ -512,11 +532,13 @@ Examples:
         "fit-reward",
         help="Fit the QoS->VMAF surrogate and report VMAF discrimination",
     )
-    fr.add_argument("--vmaf-column", default="mean_vmaf_masked_steady",
-                    help="VMAF column to fit (default: mean_vmaf_masked_steady; "
-                         "falls back through mean_vmaf_steady → mean_vmaf_masked → mean_vmaf)")
+    fr.add_argument("--vmaf-column", default="mean_vmaf_masked",
+                    help="VMAF column to fit (default: mean_vmaf_masked; "
+                         "falls back through mean_vmaf_masked_steady → mean_vmaf_steady → mean_vmaf)")
     fr.add_argument("--narrow-threshold", type=float, default=10.0,
                     help="Warn if measured VMAF range is below this (default: 10)")
+    fr.add_argument("--output-dir", type=str, default=None,
+                    help="Override the output directory (default: ./output)")
     fr.set_defaults(func=cmd_fit_reward)
 
     # --- debug-alignment ---
@@ -528,6 +550,8 @@ Examples:
                     help="Experiment ID (e.g., L0.0_D0_J0_B1000_R0)")
     da.add_argument("--step", type=int, default=10,
                     help="Extract every Nth frame (default: 10)")
+    da.add_argument("--output-dir", type=str, default=None,
+                    help="Override the output directory (default: ./output)")
     da.set_defaults(func=cmd_debug_alignment)
 
     # Parse and dispatch

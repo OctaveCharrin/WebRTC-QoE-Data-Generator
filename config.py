@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
 class Config:
     # --- Paths ---
     project_root: Path = field(default_factory=lambda: Path(__file__).parent)
+    output_dir_override: Optional[Path] = None
 
     @property
     def media_dir(self) -> Path:
@@ -16,6 +17,8 @@ class Config:
 
     @property
     def output_dir(self) -> Path:
+        if self.output_dir_override is not None:
+            return self.output_dir_override
         return self.project_root / "output"
 
     @property
@@ -68,13 +71,14 @@ class Config:
     debug_frame_step: int = 10
 
     # Frames to skip at the start of per-frame VMAF when computing the
-    # steady-state mean.  The WebRTC encoder (VP8 + GCC rate control) takes
-    # ~10-12s to converge to the target bitrate from a cold start; including
-    # ramp-up frames compresses the good-quality end of the reward surface by
-    # ~10 VMAF points.  Bad conditions (high loss / low bitrate) have no
-    # ramp-up so trimming them just reduces sample size slightly.
-    # Pair with test_duration_sec >= 30 to retain >= 20s of steady-state signal.
-    steady_state_trim_sec: float = 10.0
+    # steady-state mean.  Set to 2s to clip only the initial I-frame burst
+    # (which inflates quality for ~1-2s).  A larger trim backfires: Chrome's
+    # Y4M playback drifts ~0.011 frames/frame so by 720 frames the temporal
+    # offset has grown ~8 frames, lowering VMAF in the latter half of the
+    # recording.  Under loss, VP8 reference-frame corruption also accumulates
+    # over time.  Both effects make early frames score higher, so a large trim
+    # removes the best frames instead of the ramp-up.
+    steady_state_trim_sec: float = 2.0
 
     # --- Light-run mode ---
     # Skips tcpdump, traffic feature extraction, per-frame npy arrays, and

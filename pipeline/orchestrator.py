@@ -232,6 +232,7 @@ class Orchestrator:
                 vmaf_mode=self.config.vmaf_mode,
                 mask_region=mask_region,
                 steady_state_trim_sec=self.config.steady_state_trim_sec,
+                compute_steady=not light,
             )
 
             if light:
@@ -248,9 +249,7 @@ class Orchestrator:
                     "bitrate_kbps": condition.bitrate_kbps,
                     "repeat": repeat,
                     "mean_vmaf": vmaf_result["mean_vmaf"] or None,
-                    "mean_vmaf_steady": vmaf_result["mean_vmaf_steady"] or None,
                     "mean_vmaf_masked": vmaf_result["mean_vmaf_masked"] or None,
-                    "mean_vmaf_masked_steady": vmaf_result["mean_vmaf_masked_steady"] or None,
                     "frame_count": vmaf_result["frame_count"],
                 }
             else:

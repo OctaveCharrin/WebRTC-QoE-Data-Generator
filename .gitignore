@@ -9,6 +9,8 @@
 /output
 !/output/.gitkeep
 
+/new_output
+
 # Run logs
 *.log
 
